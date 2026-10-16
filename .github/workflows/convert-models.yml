@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install tools
-        run: pip install "torch==2.7.*" "coremltools==9.*" numpy pillow
+        run: pip install "torch==2.7.0" "coremltools==9.*" numpy pillow
 
       - name: Fetch weights
         run: bash scripts/fetch_weights.sh work
@@ -32,8 +32,9 @@ jobs:
       - name: Convert
         run: |
           set +e
-          python -I scripts/convert_models.py work FrameFinder/Models > convert.log 2>&1
+          python -I -u scripts/convert_models.py work FrameFinder/Models > convert.log 2>&1
           status=$?
+          echo "exit status $status" >> convert.log
           cat convert.log
           if [ $status -ne 0 ]; then
             echo "::error title=convert.log::$(tail -45 convert.log | cut -c1-300 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"

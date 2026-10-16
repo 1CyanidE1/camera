@@ -48,14 +48,17 @@ class Head(nn.Module):
 
 
 def convert_color():
+    print('stage: load classifier', flush=True)
     classifier = Classifier()
     state = torch.load(os.path.join(work, 'classifier.pth'), map_location='cpu', weights_only=False)
     classifier.load_state_dict(state, strict=True)
     classifier.eval()
     head = Head(classifier).eval()
 
+    print('stage: trace', flush=True)
     example = torch.rand(1, 3, 256, 256)
     traced = torch.jit.trace(head, example)
+    print('stage: convert', flush=True)
     model = ct.convert(
         traced,
         inputs=[ct.ImageType(name='image', shape=(1, 3, 256, 256), scale=1 / 255.0,
@@ -69,6 +72,7 @@ def convert_color():
     path = os.path.join(out, 'NeuralLUT.mlpackage')
     model.save(path)
 
+    print('stage: luts', flush=True)
     luts = torch.load(os.path.join(work, 'LUTs.pth'), map_location='cpu', weights_only=False)
     print('LUT keys:', list(luts.keys()), [list(luts[k].keys()) for k in luts])
     basis = np.stack([luts[str(i)]['LUT'].detach().numpy() for i in range(3)]).astype(np.float32)
@@ -95,6 +99,7 @@ def convert_color():
     print('LUT0 red channel vs identity ramp (r fastest):', identity_error)
     basis.astype('<f4').tofile(os.path.join(out, 'LUTBasis.bin'))
 
+    print('stage: verify', flush=True)
     rng = np.random.default_rng(0)
     for trial in range(3):
         pixels = (rng.random((256, 256, 3)) * 255).astype(np.uint8)
