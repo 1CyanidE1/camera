@@ -8,6 +8,7 @@ struct GalleryView: View {
     @State private var showOriginal = false
     @State private var showReasons = true
     @State private var confirmDelete = false
+    @State private var editing: ShotRecord?
 
     private var current: ShotRecord? {
         store.shots.first { $0.id == selection } ?? store.shots.first
@@ -56,6 +57,9 @@ struct GalleryView: View {
         .onChange(of: store.shots.map(\.id)) { _, ids in
             if let id = selection, !ids.contains(id) { selection = ids.first }
         }
+        .fullScreenCover(item: $editing) { record in
+            EditorView(record: record, store: store)
+        }
         .confirmationDialog("Удалить снимок из приложения?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Удалить", role: .destructive) {
                 if let shot = current { store.delete(shot) }
@@ -77,11 +81,17 @@ struct GalleryView: View {
             VStack(spacing: 2) {
                 Text(shot.date.formatted(date: .abbreviated, time: .shortened))
                     .font(.footnote.weight(.semibold))
-                Text(shot.label)
+                Text(subtitle(shot))
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.6))
             }
             Spacer()
+            Button { editing = shot } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 36, height: 36)
+                    .background(.white.opacity(0.12), in: Circle())
+            }
             ShareLink(item: store.url(for: shot.imageFile)) {
                 Image(systemName: "square.and.arrow.up")
                     .font(.body.weight(.semibold))
@@ -100,12 +110,19 @@ struct GalleryView: View {
         .padding(.vertical, 10)
     }
 
+    private func subtitle(_ shot: ShotRecord) -> String {
+        var parts = [shot.label]
+        if shot.source?.kind == .proRAW { parts.append("RAW") }
+        parts.append(ByteCountFormatter.string(fromByteCount: store.usedBytes, countStyle: .file) + " в приложении")
+        return parts.joined(separator: " · ")
+    }
+
     private var strip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 6) {
                     ForEach(store.shots) { item in
-                        ShotThumb(url: store.url(for: item.imageFile))
+                        ShotThumb(url: store.url(for: item.imageFile), revision: item.revision ?? 0)
                             .frame(width: 52, height: 52)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .overlay(
@@ -134,6 +151,7 @@ private struct ShotPage: View {
     let showOriginal: Bool
     @State private var image: UIImage?
     @State private var original: UIImage?
+    @State private var loadedRevision = 0
 
     var body: some View {
         Group {
@@ -150,7 +168,12 @@ private struct ShotPage: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: showOriginal) {
+        .task(id: "\(showOriginal)-\(shot.revision ?? 0)") {
+            if loadedRevision != (shot.revision ?? 0) {
+                loadedRevision = shot.revision ?? 0
+                image = nil
+                original = nil
+            }
             if showOriginal {
                 if original == nil { original = await ShotStore.loadImage(store.url(for: shot.originalFile)) }
             } else if image == nil {
@@ -186,6 +209,7 @@ private struct OriginalWithFrame: View {
 
 private struct ShotThumb: View {
     let url: URL
+    let revision: Int
     @State private var image: UIImage?
 
     var body: some View {
@@ -197,7 +221,7 @@ private struct ShotThumb: View {
                     .scaledToFill()
             }
         }
-        .task(id: url) {
+        .task(id: "\(url.lastPathComponent)-\(revision)") {
             image = await ShotStore.loadThumbnail(url)
         }
     }

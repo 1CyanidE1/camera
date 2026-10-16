@@ -3,6 +3,10 @@ import CoreImage
 import UIKit
 import Vision
 
+enum CaptureMode: String {
+    case standard, raw
+}
+
 struct CameraInfo {
     var baseZoom: CGFloat
     var minZoom: CGFloat
@@ -10,6 +14,8 @@ struct CameraInfo {
     var presets: [CGFloat]
     var imageAspect: CGFloat
     var limits = ExposureLimits()
+    var mode: CaptureMode = .standard
+    var rawAvailable = false
 }
 
 final class CameraPipeline: NSObject {
@@ -25,6 +31,9 @@ final class CameraPipeline: NSObject {
     private let videoOutput = AVCaptureVideoDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
     private var device: AVCaptureDevice?
+    private var input: AVCaptureDeviceInput?
+    private var captureMode: CaptureMode = .standard
+    private var proRAWFormat: OSType?
     private var baseZoom: CGFloat = 1
     private var maxZoom: CGFloat = 10
     private var inFlight: [Int64: PhotoCaptureProcessor] = [:]
@@ -58,26 +67,31 @@ final class CameraPipeline: NSObject {
     private let analysisInterval: CFTimeInterval = 0.15
     private let aestheticsInterval: CFTimeInterval = 0.7
 
-    func configure() {
+    func configure(mode: CaptureMode) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.captureMode = mode
             let info = self.setUpSession()
             if info != nil { self.session.startRunning() }
             DispatchQueue.main.async { self.onConfigured?(info) }
         }
     }
 
-    private func setUpSession() -> CameraInfo? {
-        guard let device = Self.findCamera(),
-              let input = try? AVCaptureDeviceInput(device: device) else { return nil }
-
-        session.beginConfiguration()
-        guard session.canAddInput(input) else {
-            session.commitConfiguration()
-            return nil
+    func setCaptureMode(_ mode: CaptureMode) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.input != nil, self.captureMode != mode else { return }
+            self.captureMode = mode
+            let info = self.installDevice()
+            self.videoQueue.async {
+                self.lastZoom = 0
+                self.tracker.reset()
+            }
+            DispatchQueue.main.async { self.onConfigured?(info) }
         }
-        session.addInput(input)
+    }
 
+    private func setUpSession() -> CameraInfo? {
+        session.beginConfiguration()
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
@@ -87,8 +101,26 @@ final class CameraPipeline: NSObject {
         }
         session.addOutput(videoOutput)
         session.addOutput(photoOutput)
+        session.commitConfiguration()
+        return installDevice()
+    }
 
-        if !Self.selectFormat(for: device), session.canSetSessionPreset(.photo) {
+    private func installDevice() -> CameraInfo? {
+        let wantRAW = captureMode == .raw
+        let candidate = wantRAW ? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) : Self.findCamera()
+        guard let device = candidate, let newInput = try? AVCaptureDeviceInput(device: device) else { return nil }
+
+        session.beginConfiguration()
+        if let old = input { session.removeInput(old) }
+        guard session.canAddInput(newInput) else {
+            if let old = input, session.canAddInput(old) { session.addInput(old) }
+            session.commitConfiguration()
+            return nil
+        }
+        session.addInput(newInput)
+        input = newInput
+
+        if !Self.selectFormat(for: device, preferPhotoSize: wantRAW), session.canSetSessionPreset(.photo) {
             session.sessionPreset = .photo
         }
 
@@ -101,6 +133,14 @@ final class CameraPipeline: NSObject {
         }
         photoOutput.maxPhotoQualityPrioritization = .quality
         session.commitConfiguration()
+
+        proRAWFormat = nil
+        if photoOutput.isAppleProRAWSupported {
+            photoOutput.isAppleProRAWEnabled = wantRAW
+            if wantRAW {
+                proRAWFormat = photoOutput.availableRawPhotoPixelFormatTypes.first { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) }
+            }
+        }
 
         if let biggest = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
             Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
@@ -133,7 +173,8 @@ final class CameraPipeline: NSObject {
         let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
         let aspect = CGFloat(min(dims.width, dims.height)) / CGFloat(max(dims.width, dims.height))
         return CameraInfo(baseZoom: base, minZoom: device.minAvailableVideoZoomFactor, maxZoom: maxZoom,
-                          presets: presets, imageAspect: aspect, limits: focusControl.limits)
+                          presets: presets, imageAspect: aspect, limits: focusControl.limits,
+                          mode: captureMode, rawAvailable: proRAWFormat != nil)
     }
 
     private static func findCamera() -> AVCaptureDevice? {
@@ -145,13 +186,14 @@ final class CameraPipeline: NSObject {
         return AVCaptureDevice.default(for: .video)
     }
 
-    private static func selectFormat(for device: AVCaptureDevice) -> Bool {
+    private static func selectFormat(for device: AVCaptureDevice, preferPhotoSize: Bool) -> Bool {
         func photoArea(_ f: AVCaptureDevice.Format) -> Int {
             f.supportedMaxPhotoDimensions.map { Int($0.width) * Int($0.height) }.max() ?? 0
         }
         func rank(_ f: AVCaptureDevice.Format) -> (Int, Int, Int) {
             let w = Int(CMVideoFormatDescriptionGetDimensions(f.formatDescription).width)
-            return (w <= 2112 ? 1 : 0, photoArea(f), -abs(w - 1920))
+            let moderate = w <= 2112 ? 1 : 0
+            return preferPhotoSize ? (photoArea(f), moderate, -abs(w - 1920)) : (moderate, photoArea(f), -abs(w - 1920))
         }
         let usable = device.formats.filter { f in
             let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
@@ -255,9 +297,14 @@ final class CameraPipeline: NSObject {
                 DispatchQueue.main.async { completion(nil, false) }
                 return
             }
+            let hevc = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
+            let processed: [String: Any]? = hevc ? [AVVideoCodecKey: AVVideoCodecType.hevc] : nil
+            let rawFormat = self.captureMode == .raw ? self.proRAWFormat : nil
             let settings: AVCapturePhotoSettings
-            if self.photoOutput.availablePhotoCodecTypes.contains(.hevc) {
-                settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+            if let rawFormat {
+                settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat, processedFormat: processed)
+            } else if let processed {
+                settings = AVCapturePhotoSettings(format: processed)
             } else {
                 settings = AVCapturePhotoSettings()
             }
@@ -266,6 +313,7 @@ final class CameraPipeline: NSObject {
 
             let id = settings.uniqueID
             let processor = PhotoCaptureProcessor(crop: crop, rotation: rotation, saveOriginal: saveOriginal,
+                                                  saveToPhotos: rawFormat == nil,
                                                   willCapture: willCapture, completion: completion) { [weak self] in
                 self?.sessionQueue.async { [weak self] in self?.inFlight[id] = nil }
             }

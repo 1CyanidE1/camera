@@ -314,18 +314,34 @@ private struct BottomBar: View {
 
             Spacer()
 
-            Button(action: model.toggleLock) {
-                let locked = live.overlay.frame?.locked ?? false
-                Image(systemName: locked ? "lock.fill" : "lock.open")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(locked ? Color.yellow : Color.white)
-                    .frame(width: 54, height: 54)
-                    .background(.white.opacity(0.1), in: Circle())
+            VStack(spacing: 8) {
+                Button {
+                    model.captureMode = model.captureMode == .raw ? .standard : .raw
+                } label: {
+                    Text("RAW")
+                        .font(.caption2.weight(.heavy))
+                        .foregroundStyle(model.captureMode == .raw ? Color.black : Color.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(model.captureMode == .raw ? Color.yellow : Color.white.opacity(0.14), in: Capsule())
+                }
+                lockButton
             }
-            .disabled(live.overlay.frame == nil)
-            .opacity(live.overlay.frame == nil ? 0.4 : 1)
         }
         .padding(.horizontal, 28)
+    }
+
+    private var lockButton: some View {
+        Button(action: model.toggleLock) {
+            let locked = live.overlay.frame?.locked ?? false
+            Image(systemName: locked ? "lock.fill" : "lock.open")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(locked ? Color.yellow : Color.white)
+                .frame(width: 54, height: 54)
+                .background(.white.opacity(0.1), in: Circle())
+        }
+        .disabled(live.overlay.frame == nil)
+        .opacity(live.overlay.frame == nil ? 0.4 : 1)
     }
 }
 

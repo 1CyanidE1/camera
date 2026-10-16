@@ -10,6 +10,7 @@ struct ShotSource: Codable, Equatable {
 
     var file: String
     var kind: Kind
+    var precropped: Bool?
 }
 
 struct ShotRecord: Codable, Identifiable, Equatable {
@@ -22,6 +23,9 @@ struct ShotRecord: Codable, Identifiable, Equatable {
     var rotation: PhotoRotation?
     var source: ShotSource?
     var previousCrop: CGRect?
+    var develop: DevelopParams?
+    var color: ColorParams?
+    var revision: Int?
 
     var imageFile: String { id.uuidString + ".heic" }
     var originalFile: String { id.uuidString + "-original.heic" }

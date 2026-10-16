@@ -73,6 +73,12 @@ final class CameraModel: ObservableObject {
         }
     }
     @Published var showGallery = false
+    @Published var captureMode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "captureMode") ?? "") ?? .standard {
+        didSet {
+            UserDefaults.standard.set(captureMode.rawValue, forKey: "captureMode")
+            if captureMode != oldValue { pipeline.setCaptureMode(captureMode) }
+        }
+    }
     @Published var autoShutter = UserDefaults.standard.bool(forKey: "autoShutter") {
         didSet {
             UserDefaults.standard.set(autoShutter, forKey: "autoShutter")
@@ -143,12 +149,19 @@ final class CameraModel: ObservableObject {
             guard let self else { return }
             self.info = info
             self.phase = info == nil ? .failed : .running
+            if let info, info.mode == .raw, !info.rawAvailable {
+                self.show("ProRAW на этой камере недоступен")
+                self.captureMode = .standard
+            }
+            if self.focusMode == .manual, !(info?.limits.supportsManualFocus ?? false) {
+                self.focusMode = .auto
+            }
         }
         pipeline.setAspect(aspect)
         pipeline.setFocusMode(focusMode)
         pipeline.setAssist(assist)
         pipeline.setFaceQuality(autoShutter)
-        pipeline.configure()
+        pipeline.configure(mode: captureMode)
         startMotion()
     }
 
@@ -276,12 +289,11 @@ final class CameraModel: ObservableObject {
         let label = crop == nil ? "Целиком" : (frame?.label ?? "")
         let rotation = PhotoRotation(up: up)
         let id = UUID()
-        let record = ShotRecord(id: id, date: Date(), label: label,
-                                aesthetic: crop == nil ? nil : frame?.aesthetic,
-                                crop: crop.map { up.toUpright($0) },
-                                reasons: crop == nil ? [] : (frame?.reasons ?? []),
-                                rotation: rotation,
-                                source: ShotSource(file: ShotRecord.sourceFile(for: id, kind: .heic), kind: .heic))
+        let draft = ShotRecord(id: id, date: Date(), label: label,
+                               aesthetic: crop == nil ? nil : frame?.aesthetic,
+                               crop: crop.map { up.toUpright($0) },
+                               reasons: crop == nil ? [] : (frame?.reasons ?? []),
+                               rotation: rotation)
 
         pipeline.capture(crop: crop, rotation: rotation, saveOriginal: saveOriginal,
                          willCapture: { [weak self] in self?.blink() },
@@ -292,9 +304,13 @@ final class CameraModel: ObservableObject {
                 self.show("Не удалось обработать снимок")
                 return
             }
+            var record = draft
+            record.source = ShotSource(file: ShotRecord.sourceFile(for: id, kind: shot.sourceKind), kind: shot.sourceKind)
             self.shots.add(record, viewer: shot.viewer, original: shot.original, source: shot.source)
             if let image = shot.thumbnail { self.thumbnail = image }
-            if savedToPhotos {
+            if shot.sourceKind == .proRAW {
+                self.show("RAW 48 Мп — в галерее приложения")
+            } else if savedToPhotos {
                 self.show(crop == nil ? "Сохранено" : "Сохранено · кадр \(label)")
             } else {
                 self.show("Снимок в приложении, но не в «Фото» — разреши доступ в Настройках")

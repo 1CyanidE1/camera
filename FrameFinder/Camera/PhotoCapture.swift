@@ -9,6 +9,7 @@ struct ProcessedShot {
     let viewer: Data
     let original: Data
     let source: Data
+    let sourceKind: ShotSource.Kind
     let thumbnail: UIImage?
 }
 
@@ -16,17 +17,21 @@ final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
     private let crop: CGRect?
     private let rotation: PhotoRotation
     private let saveOriginal: Bool
+    private let saveToPhotos: Bool
     private let willCapture: () -> Void
     private let completion: (ProcessedShot?, Bool) -> Void
     private let finished: () -> Void
+    private var processedData: Data?
+    private var rawData: Data?
 
-    init(crop: CGRect?, rotation: PhotoRotation, saveOriginal: Bool,
+    init(crop: CGRect?, rotation: PhotoRotation, saveOriginal: Bool, saveToPhotos: Bool,
          willCapture: @escaping () -> Void,
          completion: @escaping (ProcessedShot?, Bool) -> Void,
          finished: @escaping () -> Void) {
         self.crop = crop
         self.rotation = rotation
         self.saveOriginal = saveOriginal
+        self.saveToPhotos = saveToPhotos
         self.willCapture = willCapture
         self.completion = completion
         self.finished = finished
@@ -37,13 +42,36 @@ final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation() else {
-            deliver(nil, false)
-            return
+        guard error == nil, let data = photo.fileDataRepresentation() else { return }
+        if photo.isRawPhoto {
+            rawData = data
+        } else {
+            processedData = data
         }
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        finished()
+        let processed = processedData
+        let raw = rawData
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            guard let result = PhotoProcessor.process(data: data, crop: crop, rotation: rotation) else {
+            if let raw {
+                let previewData = processed ?? PhotoProcessor.developRAW(raw)
+                guard let preview = previewData, let result = PhotoProcessor.process(data: preview, crop: crop, rotation: rotation) else {
+                    deliver(nil, false)
+                    return
+                }
+                let shot = ProcessedShot(viewer: result.shot.viewer, original: result.shot.original,
+                                         source: raw, sourceKind: .proRAW, thumbnail: result.shot.thumbnail)
+                deliver(shot, false)
+                return
+            }
+            guard let data = processed, let result = PhotoProcessor.process(data: data, crop: crop, rotation: rotation) else {
                 deliver(nil, false)
+                return
+            }
+            guard saveToPhotos else {
+                deliver(result.shot, false)
                 return
             }
             var items = [result.full]
@@ -54,17 +82,20 @@ final class PhotoCaptureProcessor: NSObject, AVCapturePhotoCaptureDelegate {
         }
     }
 
-    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
-        finished()
-    }
-
     private func deliver(_ shot: ProcessedShot?, _ ok: Bool) {
         DispatchQueue.main.async { self.completion(shot, ok) }
     }
 }
 
 enum PhotoProcessor {
-    private static let context = CIContext(options: [.cacheIntermediates: false])
+    static let context = CIContext(options: [.cacheIntermediates: false])
+
+    static func developRAW(_ data: Data) -> Data? {
+        guard let filter = CIRAWFilter(imageData: data, identifierHint: nil),
+              let image = filter.outputImage else { return nil }
+        let colorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+        return encode(atOrigin(image), colorSpace: colorSpace, metadata: [:], quality: 0.9)
+    }
 
     static func process(data: Data, crop: CGRect?, rotation: PhotoRotation) -> (full: Data, shot: ProcessedShot)? {
         guard let source = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return nil }
@@ -95,7 +126,7 @@ enum PhotoProcessor {
 
         guard let viewer = encode(scaled(framed, maxSide: 3072), colorSpace: colorSpace, metadata: [:], quality: 0.85),
               let original = encode(scaled(whole, maxSide: 1280), colorSpace: colorSpace, metadata: [:], quality: 0.8) else { return nil }
-        return (full, ProcessedShot(viewer: viewer, original: original, source: data, thumbnail: thumbnail(viewer)))
+        return (full, ProcessedShot(viewer: viewer, original: original, source: data, sourceKind: .heic, thumbnail: thumbnail(viewer)))
     }
 
     static func thumbnail(_ data: Data) -> UIImage? {
@@ -113,7 +144,7 @@ enum PhotoProcessor {
         return UIImage(cgImage: cgImage)
     }
 
-    private static func oriented(_ image: CIImage, _ rotation: PhotoRotation) -> CIImage {
+    static func oriented(_ image: CIImage, _ rotation: PhotoRotation) -> CIImage {
         switch rotation {
         case .none: return image
         case .clockwise: return image.oriented(.right)
@@ -122,11 +153,11 @@ enum PhotoProcessor {
         }
     }
 
-    private static func atOrigin(_ image: CIImage) -> CIImage {
+    static func atOrigin(_ image: CIImage) -> CIImage {
         image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
     }
 
-    private static func scaled(_ image: CIImage, maxSide: CGFloat) -> CIImage {
+    static func scaled(_ image: CIImage, maxSide: CGFloat) -> CIImage {
         let longest = max(image.extent.width, image.extent.height)
         guard longest > maxSide else { return image }
         let s = maxSide / longest
@@ -137,7 +168,7 @@ enum PhotoProcessor {
         return atOrigin(resized.cropped(to: resized.extent.integral))
     }
 
-    private static func encode(_ image: CIImage, colorSpace: CGColorSpace, metadata: [String: Any], quality: Double) -> Data? {
+    static func encode(_ image: CIImage, colorSpace: CGColorSpace, metadata: [String: Any], quality: Double) -> Data? {
         guard let cgImage = context.createCGImage(image, from: image.extent.integral, format: .RGBA8, colorSpace: colorSpace) else { return nil }
 
         var properties = metadata
