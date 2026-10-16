@@ -3,6 +3,10 @@ import CoreMotion
 import SwiftUI
 import UIKit
 
+enum ProControl {
+    case focus, iso, shutter
+}
+
 struct FocusMarker: Equatable {
     var point: CGPoint
     var locked: Bool
@@ -40,7 +44,32 @@ final class CameraModel: ObservableObject {
             UserDefaults.standard.set(focusMode.rawValue, forKey: "focusMode")
             pipeline.setFocusMode(focusMode)
             exposureBias = 0
-            withAnimation(.easeOut(duration: 0.2)) { focusMarker = nil }
+            withAnimation(.easeOut(duration: 0.2)) {
+                focusMarker = nil
+                if focusMode == .manual {
+                    lensPosition = live.overlay.readout.lensPosition
+                    editing = .focus
+                } else if editing == .focus {
+                    editing = nil
+                }
+            }
+        }
+    }
+    @Published var editing: ProControl?
+    @Published var lensPosition: Float = 0.5
+    @Published var isoPosition: Double = 0.3
+    @Published var shutterPosition: Double = 0.5
+    @Published var loupeOn = false
+    @Published var assist = AssistOptions(
+        zebra: UserDefaults.standard.bool(forKey: "zebra"),
+        peaking: UserDefaults.standard.bool(forKey: "peaking"),
+        histogram: UserDefaults.standard.object(forKey: "histogram") as? Bool ?? true
+    ) {
+        didSet {
+            UserDefaults.standard.set(assist.zebra, forKey: "zebra")
+            UserDefaults.standard.set(assist.peaking, forKey: "peaking")
+            UserDefaults.standard.set(assist.histogram, forKey: "histogram")
+            pipeline.setAssist(assist)
         }
     }
     @Published var showGallery = false
@@ -101,6 +130,7 @@ final class CameraModel: ObservableObject {
         }
         pipeline.setAspect(aspect)
         pipeline.setFocusMode(focusMode)
+        pipeline.setAssist(assist)
         pipeline.configure()
         startMotion()
     }
@@ -290,5 +320,58 @@ final class CameraModel: ObservableObject {
             guard self.markerToken == token, !self.adjustingBias else { return }
             withAnimation(.easeOut(duration: 0.3)) { self.focusMarker = nil }
         }
+    }
+
+    func edit(_ control: ProControl) {
+        guard let limits = info?.limits else { return }
+        let r = live.overlay.readout
+        switch control {
+        case .iso:
+            isoPosition = Self.position(Double(r.iso), Double(limits.minISO), Double(limits.maxISO))
+        case .shutter:
+            shutterPosition = Self.position(r.duration, limits.minDuration, limits.maxDuration)
+        case .focus:
+            lensPosition = r.lensPosition
+        }
+        withAnimation(.easeInOut(duration: 0.2)) { editing = editing == control ? nil : control }
+    }
+
+    func setISOPosition(_ t: Double) {
+        isoPosition = t
+        guard let limits = info?.limits else { return }
+        let iso = Self.value(t, Double(limits.minISO), Double(limits.maxISO))
+        pipeline.setManualExposure(iso: Float(iso), duration: nil)
+    }
+
+    func setShutterPosition(_ t: Double) {
+        shutterPosition = t
+        guard let limits = info?.limits else { return }
+        pipeline.setManualExposure(iso: nil, duration: Self.value(t, limits.minDuration, limits.maxDuration))
+    }
+
+    func autoExposure() {
+        pipeline.setAutoExposure()
+        selectionHaptic.selectionChanged()
+        withAnimation(.easeInOut(duration: 0.2)) { editing = nil }
+    }
+
+    func setLens(_ position: Float) {
+        lensPosition = position
+        pipeline.setLensPosition(position)
+    }
+
+    func lensEditing(_ active: Bool) {
+        pipeline.setForcePeaking(active)
+        pipeline.setLoupe(active ? (focusMarker?.point ?? CGPoint(x: 0.5, y: 0.5)) : nil)
+        withAnimation(.easeOut(duration: 0.15)) { loupeOn = active }
+    }
+
+    private static func position(_ v: Double, _ lo: Double, _ hi: Double) -> Double {
+        guard hi > lo, v > 0, lo > 0 else { return 0.5 }
+        return min(max(log(v / lo) / log(hi / lo), 0), 1)
+    }
+
+    private static func value(_ t: Double, _ lo: Double, _ hi: Double) -> Double {
+        lo * pow(hi / lo, t)
     }
 }

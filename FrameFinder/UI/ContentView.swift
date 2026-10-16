@@ -34,7 +34,13 @@ struct ContentView: View {
             viewfinder
             ProBar(model: model, live: model.live)
             Spacer(minLength: 0)
-            ZoomBar(model: model, live: model.live)
+            if model.editing != nil {
+                ControlRow(model: model, live: model.live)
+                    .transition(.opacity)
+            } else {
+                ZoomBar(model: model, live: model.live)
+                    .transition(.opacity)
+            }
             BottomBar(model: model, live: model.live)
         }
         .padding(.bottom, 10)
@@ -44,7 +50,11 @@ struct ContentView: View {
         GeometryReader { geo in
             ZStack {
                 CameraPreview(session: model.pipeline.session, ready: model.info != nil)
+                AssistLayer(pipeline: model.pipeline)
                 FrameOverlay(live: model.live, explain: model.explain)
+                if model.assist.histogram {
+                    HistogramCorner(live: model.live)
+                }
                 if model.explain {
                     ExplainPanel(live: model.live)
                         .transition(.opacity)
@@ -76,6 +86,16 @@ struct ContentView: View {
                     }
                     .allowsHitTesting(false)
                 }
+                if model.loupeOn {
+                    VStack {
+                        LoupeView(pipeline: model.pipeline)
+                            .frame(width: 150, height: 150)
+                            .padding(.top, 12)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
                 if model.flash {
                     Color.black.opacity(0.85).allowsHitTesting(false)
                 }
@@ -99,47 +119,19 @@ struct ContentView: View {
     }
 }
 
-private struct ProBar: View {
-    @ObservedObject var model: CameraModel
+private struct HistogramCorner: View {
     @ObservedObject var live: LiveState
 
     var body: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 2) {
-                ForEach(FocusMode.allCases.filter { $0 != .manual }) { mode in
-                    Button {
-                        model.focusMode = mode
-                    } label: {
-                        Text(mode.title)
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(model.focusMode == mode ? Color.black : Color.white)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(model.focusMode == mode ? Color.yellow : Color.clear, in: Capsule())
-                    }
-                }
+        VStack {
+            HStack {
+                Spacer()
+                HistogramView(bins: live.overlay.histogram)
             }
-            .padding(2)
-            .background(.white.opacity(0.1), in: Capsule())
-            Spacer(minLength: 0)
-            Text(readout)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.white.opacity(0.75))
-                .lineLimit(1)
+            Spacer()
         }
-        .padding(.horizontal, 16)
-    }
-
-    private var readout: String {
-        let r = live.overlay.readout
-        guard r.iso > 0 else { return "" }
-        return "ISO \(Int(r.iso.rounded()))  \(Self.shutter(r.duration))  EV \(String(format: "%+.1f", r.bias))"
-    }
-
-    static func shutter(_ seconds: Double) -> String {
-        guard seconds > 0 else { return "" }
-        if seconds >= 0.95 { return String(format: "%.1f\"", seconds) }
-        return "1/\(Int((1 / seconds).rounded()))"
+        .padding(8)
+        .allowsHitTesting(false)
     }
 }
 
@@ -183,6 +175,9 @@ private struct TopBar: View {
 
             Menu {
                 Toggle("Сохранять и оригинал", isOn: $model.saveOriginal)
+                Toggle("Зебра на пересветах", isOn: $model.assist.zebra)
+                Toggle("Подсветка резкости", isOn: $model.assist.peaking)
+                Toggle("Гистограмма", isOn: $model.assist.histogram)
             } label: {
                 Image(systemName: "gearshape")
                     .font(.body.weight(.semibold))

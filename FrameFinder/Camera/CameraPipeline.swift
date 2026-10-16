@@ -9,6 +9,7 @@ struct CameraInfo {
     var maxZoom: CGFloat
     var presets: [CGFloat]
     var imageAspect: CGFloat
+    var limits = ExposureLimits()
 }
 
 final class CameraPipeline: NSObject {
@@ -16,6 +17,8 @@ final class CameraPipeline: NSObject {
 
     var onOverlay: ((OverlayState) -> Void)?
     var onConfigured: ((CameraInfo?) -> Void)?
+    var assistSink: ((CGImage?) -> Void)?
+    var loupeSink: ((CGImage?) -> Void)?
 
     private let sessionQueue = DispatchQueue(label: "camera.session")
     private let videoQueue = DispatchQueue(label: "camera.video", qos: .userInteractive)
@@ -28,6 +31,17 @@ final class CameraPipeline: NSObject {
 
     private let focusControl = FocusExposureController()
     private var lastEyes: [CGPoint] = []
+    private var manualExposure = false
+
+    private var assistOptions = AssistOptions()
+    private var forcePeaking = false
+    private var loupePoint: CGPoint?
+    private var histogram: [UInt8] = []
+    private var lastHistogram: CFTimeInterval = 0
+    private var lastMask: CFTimeInterval = 0
+    private var maskVisible = false
+    private var lastLoupe: CFTimeInterval = 0
+    private var loupeVisible = false
 
     private let tracker = MotionTracker()
     private let analyzer = SceneAnalyzer()
@@ -118,7 +132,7 @@ final class CameraPipeline: NSObject {
         let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
         let aspect = CGFloat(min(dims.width, dims.height)) / CGFloat(max(dims.width, dims.height))
         return CameraInfo(baseZoom: base, minZoom: device.minAvailableVideoZoomFactor, maxZoom: maxZoom,
-                          presets: presets, imageAspect: aspect)
+                          presets: presets, imageAspect: aspect, limits: focusControl.limits)
     }
 
     private static func findCamera() -> AVCaptureDevice? {
@@ -197,6 +211,36 @@ final class CameraPipeline: NSObject {
         sessionQueue.async { self.focusControl.setBias(ev) }
     }
 
+    func setLensPosition(_ position: Float) {
+        sessionQueue.async { self.focusControl.setLensPosition(position) }
+    }
+
+    func setManualExposure(iso: Float?, duration: Double?) {
+        sessionQueue.async {
+            self.focusControl.setManualExposure(iso: iso, duration: duration)
+            self.manualExposure = true
+        }
+    }
+
+    func setAutoExposure() {
+        sessionQueue.async {
+            self.focusControl.setAutoExposure()
+            self.manualExposure = false
+        }
+    }
+
+    func setAssist(_ options: AssistOptions) {
+        videoQueue.async { self.assistOptions = options }
+    }
+
+    func setForcePeaking(_ on: Bool) {
+        videoQueue.async { self.forcePeaking = on }
+    }
+
+    func setLoupe(_ point: CGPoint?) {
+        videoQueue.async { self.loupePoint = point }
+    }
+
     func capture(crop: CGRect?, rotation: PhotoRotation, saveOriginal: Bool,
                  willCapture: @escaping () -> Void,
                  completion: @escaping (ProcessedShot?, Bool) -> Void) {
@@ -213,7 +257,7 @@ final class CameraPipeline: NSObject {
                 settings = AVCapturePhotoSettings()
             }
             settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
-            settings.photoQualityPrioritization = .balanced
+            settings.photoQualityPrioritization = self.manualExposure ? .speed : .balanced
 
             let id = settings.uniqueID
             let processor = PhotoCaptureProcessor(crop: crop, rotation: rotation, saveOriginal: saveOriginal,
@@ -264,6 +308,53 @@ final class CameraPipeline: NSObject {
 }
 
 extension CameraPipeline {
+    private func runAssist(_ pixelBuffer: CVPixelBuffer, now: CFTimeInterval) {
+        if assistOptions.histogram, now - lastHistogram > 0.1 {
+            lastHistogram = now
+            histogram = FrameAssist.histogram(pixelBuffer) ?? histogram
+        }
+
+        let zebra = assistOptions.zebra
+        let peaking = assistOptions.peaking || forcePeaking
+        if zebra || peaking {
+            if now - lastMask > 1.0 / 12 {
+                lastMask = now
+                let image = FrameAssist.mask(pixelBuffer, zebra: zebra, peaking: peaking)
+                maskVisible = true
+                let sink = assistSink
+                DispatchQueue.main.async { sink?(image) }
+            }
+        } else if maskVisible {
+            maskVisible = false
+            let sink = assistSink
+            DispatchQueue.main.async { sink?(nil) }
+        }
+
+        if let point = loupePoint {
+            if now - lastLoupe > 1.0 / 15 {
+                lastLoupe = now
+                loupeVisible = true
+                let image = loupeImage(pixelBuffer, at: point)
+                let sink = loupeSink
+                DispatchQueue.main.async { sink?(image) }
+            }
+        } else if loupeVisible {
+            loupeVisible = false
+            let sink = loupeSink
+            DispatchQueue.main.async { sink?(nil) }
+        }
+    }
+
+    private func loupeImage(_ pixelBuffer: CVPixelBuffer, at point: CGPoint) -> CGImage? {
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        let e = image.extent
+        let side = e.width / 7
+        let cx = min(max(point.x * e.width, side / 2), e.width - side / 2)
+        let cy = min(max((1 - point.y) * e.height, side / 2), e.height - side / 2)
+        let rect = CGRect(x: cx - side / 2, y: cy - side / 2, width: side, height: side).integral
+        return ciContext.createCGImage(image, from: rect)
+    }
+
     private func smartFocusTarget(for frame: OverlayState.Frame?) -> CGPoint? {
         guard let frame, frame.visible > 0.6 else { return nil }
         if let face = frame.faces.max(by: { $0.area < $1.area }) {
@@ -313,6 +404,8 @@ extension CameraPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
         if lastAnalysis == now, let target = smartFocusTarget(for: state.frame) {
             sessionQueue.async { self.focusControl.track(target, now: now) }
         }
+        runAssist(pixelBuffer, now: now)
+        state.histogram = assistOptions.histogram ? histogram : []
         let callback = onOverlay
         DispatchQueue.main.async { callback?(state) }
     }

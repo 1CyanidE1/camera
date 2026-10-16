@@ -23,6 +23,15 @@ struct CameraReadout: Equatable {
     var lensPosition: Float = 0
     var adjustingFocus = false
     var adjustingExposure = false
+    var manualExposure = false
+}
+
+struct ExposureLimits: Equatable {
+    var minISO: Float = 50
+    var maxISO: Float = 3200
+    var minDuration: Double = 1.0 / 8000
+    var maxDuration: Double = 1.0 / 3
+    var supportsManualFocus = false
 }
 
 final class FocusExposureController {
@@ -32,6 +41,17 @@ final class FocusExposureController {
     private var trackingPausedUntil: CFTimeInterval = 0
     private var lastTracked: CGPoint?
     private var lastTrackTime: CFTimeInterval = 0
+    private(set) var manualExposure = false
+
+    var limits: ExposureLimits {
+        guard let d = device else { return ExposureLimits() }
+        let format = d.activeFormat
+        return ExposureLimits(minISO: format.minISO,
+                              maxISO: format.maxISO,
+                              minDuration: max(format.minExposureDuration.seconds, 1.0 / 16000),
+                              maxDuration: min(format.maxExposureDuration.seconds, 1.0),
+                              supportsManualFocus: d.isLockingFocusWithCustomLensPositionSupported)
+    }
 
     func attach(_ device: AVCaptureDevice) {
         self.device = device
@@ -49,6 +69,12 @@ final class FocusExposureController {
         locked = false
         lastTracked = nil
         configure { d in
+            if d.isVirtualDevice {
+                let behavior: AVCaptureDevice.PrimaryConstituentDeviceSwitchingBehavior = newMode == .manual ? .locked : .auto
+                if d.primaryConstituentDeviceSwitchingBehavior != behavior {
+                    d.setPrimaryConstituentDeviceSwitchingBehavior(behavior, restrictedSwitchingBehaviorConditions: [])
+                }
+            }
             switch newMode {
             case .auto, .continuous:
                 if d.isFocusModeSupported(.continuousAutoFocus) { d.focusMode = .continuousAutoFocus }
@@ -106,6 +132,35 @@ final class FocusExposureController {
         setMode(mode)
     }
 
+    func setLensPosition(_ position: Float) {
+        guard mode == .manual else { return }
+        configure { d in
+            if d.isLockingFocusWithCustomLensPositionSupported {
+                d.setFocusModeLocked(lensPosition: min(max(position, 0), 1), completionHandler: nil)
+            }
+        }
+    }
+
+    func setManualExposure(iso: Float?, duration: Double?) {
+        configure { d in
+            guard d.isExposureModeSupported(.custom) else { return }
+            let format = d.activeFormat
+            let targetISO = min(max(iso ?? d.iso, format.minISO), format.maxISO)
+            let seconds = min(max(duration ?? d.exposureDuration.seconds, format.minExposureDuration.seconds),
+                              format.maxExposureDuration.seconds)
+            d.setExposureModeCustom(duration: CMTime(seconds: seconds, preferredTimescale: 1_000_000),
+                                    iso: targetISO, completionHandler: nil)
+            self.manualExposure = true
+        }
+    }
+
+    func setAutoExposure() {
+        manualExposure = false
+        configure { d in
+            if d.isExposureModeSupported(.continuousAutoExposure) { d.exposureMode = .continuousAutoExposure }
+        }
+    }
+
     func setBias(_ ev: Float) {
         configure { d in
             let value = min(max(ev, d.minExposureTargetBias), d.maxExposureTargetBias)
@@ -138,7 +193,8 @@ final class FocusExposureController {
                       bias: device.exposureTargetBias,
                       lensPosition: device.lensPosition,
                       adjustingFocus: device.isAdjustingFocus,
-                      adjustingExposure: device.isAdjustingExposure)
+                      adjustingExposure: device.isAdjustingExposure,
+                      manualExposure: device.exposureMode == .custom)
     }
 
     private func configure(_ body: (AVCaptureDevice) -> Void) {
