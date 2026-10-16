@@ -151,12 +151,16 @@ final class CameraModel: ObservableObject {
             if r.iou(.unit) < 0.96 { crop = r }
         }
         let label = crop == nil ? "Целиком" : (frame?.label ?? "")
-        let record = ShotRecord(id: UUID(), date: Date(), label: label,
+        let rotation = PhotoRotation(up: up)
+        let id = UUID()
+        let record = ShotRecord(id: id, date: Date(), label: label,
                                 aesthetic: crop == nil ? nil : frame?.aesthetic,
                                 crop: crop.map { up.toUpright($0) },
-                                reasons: crop == nil ? [] : (frame?.reasons ?? []))
+                                reasons: crop == nil ? [] : (frame?.reasons ?? []),
+                                rotation: rotation,
+                                source: ShotSource(file: ShotRecord.sourceFile(for: id, kind: .heic), kind: .heic))
 
-        pipeline.capture(crop: crop, rotation: PhotoRotation(up: up), saveOriginal: saveOriginal,
+        pipeline.capture(crop: crop, rotation: rotation, saveOriginal: saveOriginal,
                          willCapture: { [weak self] in self?.blink() },
                          completion: { [weak self] shot, savedToPhotos in
             guard let self else { return }
@@ -165,7 +169,7 @@ final class CameraModel: ObservableObject {
                 self.show("Не удалось обработать снимок")
                 return
             }
-            self.shots.add(record, viewer: shot.viewer, original: shot.original)
+            self.shots.add(record, viewer: shot.viewer, original: shot.original, source: shot.source)
             if let image = shot.thumbnail { self.thumbnail = image }
             if savedToPhotos {
                 self.show(crop == nil ? "Сохранено" : "Сохранено · кадр \(label)")

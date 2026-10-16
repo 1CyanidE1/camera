@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct ProcessedShot {
     let viewer: Data
     let original: Data
+    let source: Data
     let thumbnail: UIImage?
 }
 
@@ -94,7 +95,7 @@ enum PhotoProcessor {
 
         guard let viewer = encode(scaled(framed, maxSide: 3072), colorSpace: colorSpace, metadata: [:], quality: 0.85),
               let original = encode(scaled(whole, maxSide: 1280), colorSpace: colorSpace, metadata: [:], quality: 0.8) else { return nil }
-        return (full, ProcessedShot(viewer: viewer, original: original, thumbnail: thumbnail(viewer)))
+        return (full, ProcessedShot(viewer: viewer, original: original, source: data, thumbnail: thumbnail(viewer)))
     }
 
     static func thumbnail(_ data: Data) -> UIImage? {

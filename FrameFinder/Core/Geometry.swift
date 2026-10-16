@@ -110,8 +110,8 @@ enum AspectMode: String, CaseIterable, Identifiable {
     }
 }
 
-enum PhotoRotation {
-    case none, clockwise, counterClockwise, upsideDown
+enum PhotoRotation: Int, Codable {
+    case none = 0, clockwise = 1, upsideDown = 2, counterClockwise = 3
 
     init(up: UpDirection) {
         switch up {
