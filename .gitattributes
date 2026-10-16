@@ -1,0 +1,3 @@
+FrameFinder/Models/** -text
+*.pth -text
+*.bin -text
