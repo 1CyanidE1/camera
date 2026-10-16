@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -231,7 +232,24 @@ private struct ZoomBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            if let info = model.info {
+            if let info = model.info, !info.lenses.isEmpty {
+                ForEach(info.lenses, id: \.self) { lens in
+                    let active = lens.type == info.activeLens
+                    Button {
+                        model.selectLens(lens.type)
+                    } label: {
+                        Text(lens.label + (active ? "×" : ""))
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(active ? Color.black : Color.white)
+                            .frame(minWidth: 38, minHeight: 38)
+                            .background(active ? Color.yellow : Color.white.opacity(0.1), in: Circle())
+                    }
+                }
+                Text(Self.format(live.overlay.zoom) + "×")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.yellow)
+                    .padding(.horizontal, 6)
+            } else if let info = model.info {
                 ForEach(info.presets, id: \.self) { factor in
                     let value = factor / info.baseZoom
                     let active = abs(live.overlay.zoom - value) / value < 0.05

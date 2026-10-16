@@ -154,7 +154,7 @@ struct ProBar: View {
     }
 
     private var modes: [FocusMode] {
-        FocusMode.allCases.filter { $0 != .manual || (model.info?.limits.supportsManualFocus ?? false) }
+        FocusMode.allCases
     }
 
     private func chip(_ text: String, active: Bool, manual: Bool, action: @escaping () -> Void) -> some View {

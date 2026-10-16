@@ -7,6 +7,11 @@ enum CaptureMode: String {
     case standard, raw
 }
 
+struct LensOption: Hashable {
+    let type: AVCaptureDevice.DeviceType
+    let label: String
+}
+
 struct CameraInfo {
     var baseZoom: CGFloat
     var minZoom: CGFloat
@@ -16,6 +21,9 @@ struct CameraInfo {
     var limits = ExposureLimits()
     var mode: CaptureMode = .standard
     var rawAvailable = false
+    var lenses: [LensOption] = []
+    var activeLens: AVCaptureDevice.DeviceType?
+    var manualHardware = false
 }
 
 final class CameraPipeline: NSObject {
@@ -36,6 +44,10 @@ final class CameraPipeline: NSObject {
     private var input: AVCaptureDeviceInput?
     private var captureMode: CaptureMode = .standard
     private var proRAWFormat: OSType?
+    private var physicalLens: AVCaptureDevice.DeviceType?
+    private var lensFactors: [AVCaptureDevice.DeviceType: CGFloat] = [:]
+    private var lensOrder: [AVCaptureDevice.DeviceType] = []
+    private var wideFactor: CGFloat = 1
     private var baseZoom: CGFloat = 1
     private var maxZoom: CGFloat = 10
     private var inFlight: [Int64: PhotoCaptureProcessor] = [:]
@@ -87,13 +99,71 @@ final class CameraPipeline: NSObject {
         sessionQueue.async { [weak self] in
             guard let self, self.input != nil, self.captureMode != mode else { return }
             self.captureMode = mode
-            let info = self.installDevice()
-            self.videoQueue.async {
-                self.lastZoom = 0
-                self.tracker.reset()
-            }
-            DispatchQueue.main.async { self.onConfigured?(info) }
+            self.reinstall(displayZoom: nil)
         }
+    }
+
+    func setPhysicalMode(_ on: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.input != nil, self.captureMode == .standard, on != (self.physicalLens != nil) else { return }
+            self.loadLensFactors()
+            let displayZoom = (self.device?.videoZoomFactor ?? self.baseZoom) / self.baseZoom
+            if on {
+                let active = self.device?.activePrimaryConstituent?.deviceType ?? .builtInWideAngleCamera
+                self.physicalLens = self.lensFactors[active] != nil ? active : .builtInWideAngleCamera
+            } else {
+                self.physicalLens = nil
+            }
+            self.reinstall(displayZoom: displayZoom)
+        }
+    }
+
+    func setPhysicalLens(_ type: AVCaptureDevice.DeviceType) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.physicalLens != nil, self.physicalLens != type else { return }
+            self.physicalLens = type
+            self.reinstall(displayZoom: nil)
+        }
+    }
+
+    func pause() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
+        }
+    }
+
+    func resume() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.input != nil, !self.session.isRunning else { return }
+            self.session.startRunning()
+        }
+    }
+
+    private func reinstall(displayZoom: CGFloat?) {
+        let info = installDevice(displayZoom: displayZoom)
+        videoQueue.async {
+            self.lastZoom = 0
+            self.tracker.reset()
+        }
+        DispatchQueue.main.async { self.onConfigured?(info) }
+    }
+
+    private func loadLensFactors() {
+        guard lensFactors.isEmpty, let virtual = Self.findCamera() else { return }
+        let switchOver = virtual.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+        let order: [AVCaptureDevice.DeviceType] = [.builtInUltraWideCamera, .builtInWideAngleCamera, .builtInTelephotoCamera]
+        let present = order.filter { type in virtual.constituentDevices.contains { $0.deviceType == type } }
+        if present.isEmpty {
+            lensFactors[.builtInWideAngleCamera] = 1
+            lensOrder = [.builtInWideAngleCamera]
+        } else {
+            for (i, type) in present.enumerated() {
+                lensFactors[type] = i == 0 ? 1 : (i - 1 < switchOver.count ? switchOver[i - 1] : 1)
+            }
+            lensOrder = present
+        }
+        wideFactor = lensFactors[.builtInWideAngleCamera] ?? 1
     }
 
     private func setUpSession() -> CameraInfo? {
@@ -108,12 +178,19 @@ final class CameraPipeline: NSObject {
         session.addOutput(videoOutput)
         session.addOutput(photoOutput)
         session.commitConfiguration()
-        return installDevice()
+        return installDevice(displayZoom: nil)
     }
 
-    private func installDevice() -> CameraInfo? {
+    private func installDevice(displayZoom: CGFloat?) -> CameraInfo? {
         let wantRAW = captureMode == .raw
-        let candidate = wantRAW ? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) : Self.findCamera()
+        loadLensFactors()
+        let lensType: AVCaptureDevice.DeviceType? = wantRAW ? .builtInWideAngleCamera : physicalLens
+        let candidate: AVCaptureDevice?
+        if let lensType {
+            candidate = AVCaptureDevice.default(lensType, for: .video, position: .back)
+        } else {
+            candidate = Self.findCamera()
+        }
         guard let device = candidate, let newInput = try? AVCaptureDeviceInput(device: device) else { return nil }
 
         session.beginConfiguration()
@@ -156,18 +233,41 @@ final class CameraPipeline: NSObject {
 
         let switchOver = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
         let hasUltraWide = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
-        let base: CGFloat = hasUltraWide ? (switchOver.first ?? 1) : 1
-        let maxZoom = min(device.maxAvailableVideoZoomFactor, base * 25)
-        var presets: [CGFloat] = hasUltraWide ? [device.minAvailableVideoZoomFactor, base] : [base]
-        presets += switchOver.filter { $0 > base + 0.01 }
-        if !presets.contains(where: { $0 > base * 1.5 && $0 < base * 2.5 }) {
-            presets.append(base * 2)
+        let base: CGFloat
+        if let lensType {
+            base = wideFactor / (lensFactors[lensType] ?? wideFactor)
+        } else {
+            base = hasUltraWide ? (switchOver.first ?? 1) : 1
         }
-        presets = presets.filter { $0 <= maxZoom }.sorted()
+        let maxZoom = min(device.maxAvailableVideoZoomFactor, max(base, 1) * 25)
+        var presets: [CGFloat] = []
+        var lenses: [LensOption] = []
+        if lensType == nil {
+            presets = hasUltraWide ? [device.minAvailableVideoZoomFactor, base] : [base]
+            presets += switchOver.filter { $0 > base + 0.01 }
+            if !presets.contains(where: { $0 > base * 1.5 && $0 < base * 2.5 }) {
+                presets.append(base * 2)
+            }
+            presets = presets.filter { $0 <= maxZoom }.sorted()
+        } else if wantRAW {
+            presets = [1, 2].filter { $0 <= maxZoom }
+        } else {
+            lenses = lensOrder.map { type in
+                let value = (lensFactors[type] ?? wideFactor) / wideFactor
+                let text = value < 1 ? String(format: "%.1f", value).replacingOccurrences(of: "0.", with: ".") : String(format: "%.0f", value)
+                return LensOption(type: type, label: text)
+            }
+        }
 
+        let startZoom: CGFloat
+        if let displayZoom {
+            startZoom = min(max(displayZoom * base, device.minAvailableVideoZoomFactor), maxZoom)
+        } else {
+            startZoom = lensType == nil ? base : max(device.minAvailableVideoZoomFactor, 1)
+        }
         do {
             try device.lockForConfiguration()
-            device.videoZoomFactor = base
+            device.videoZoomFactor = startZoom
             device.unlockForConfiguration()
         } catch {}
 
@@ -180,7 +280,8 @@ final class CameraPipeline: NSObject {
         let aspect = CGFloat(min(dims.width, dims.height)) / CGFloat(max(dims.width, dims.height))
         return CameraInfo(baseZoom: base, minZoom: device.minAvailableVideoZoomFactor, maxZoom: maxZoom,
                           presets: presets, imageAspect: aspect, limits: focusControl.limits,
-                          mode: captureMode, rawAvailable: proRAWFormat != nil)
+                          mode: captureMode, rawAvailable: proRAWFormat != nil,
+                          lenses: lenses, activeLens: lensType, manualHardware: lensType != nil)
     }
 
     private static func findCamera() -> AVCaptureDevice? {
@@ -413,7 +514,7 @@ extension CameraPipeline {
         let zebra = assistOptions.zebra
         let peaking = assistOptions.peaking || forcePeaking
         if zebra || peaking {
-            if now - lastMask > 1.0 / 12 {
+            if now - lastMask > 1.0 / 40 {
                 lastMask = now
                 let image = FrameAssist.mask(pixelBuffer, zebra: zebra, peaking: peaking)
                 maskVisible = true

@@ -43,6 +43,7 @@ final class CameraModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(focusMode.rawValue, forKey: "focusMode")
             pipeline.setFocusMode(focusMode)
+            updateHardware()
             exposureBias = 0
             withAnimation(.easeOut(duration: 0.2)) {
                 focusMarker = nil
@@ -72,7 +73,18 @@ final class CameraModel: ObservableObject {
             pipeline.setAssist(assist)
         }
     }
-    @Published var showGallery = false
+    @Published var showGallery = false {
+        didSet {
+            guard showGallery != oldValue else { return }
+            if showGallery {
+                pipeline.pause()
+                motion.stopDeviceMotionUpdates()
+            } else {
+                pipeline.resume()
+                startMotion()
+            }
+        }
+    }
     @Published var captureMode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "captureMode") ?? "") ?? .standard {
         didSet {
             UserDefaults.standard.set(captureMode.rawValue, forKey: "captureMode")
@@ -108,6 +120,9 @@ final class CameraModel: ObservableObject {
     private var up: UpDirection = .top
     private var started = false
     private var pinchBase: CGFloat?
+    private var manualExposureActive = false
+    private var customISO: Double?
+    private var customDuration: Double?
     private var lastFrameId: Int?
     private var wasAligned = false
     private var biasStart: Float = 0
@@ -160,8 +175,17 @@ final class CameraModel: ObservableObject {
                 self.show("ProRAW на этой камере недоступен")
                 self.captureMode = .standard
             }
-            if self.focusMode == .manual, !(info?.limits.supportsManualFocus ?? false) {
+            guard let info else { return }
+            if info.mode == .standard, self.needsPhysical != info.manualHardware {
+                self.updateHardware()
+                return
+            }
+            if self.focusMode == .manual, info.manualHardware || info.mode == .raw, !info.limits.supportsManualFocus {
+                self.show("Ручной фокус на этом объективе недоступен")
                 self.focusMode = .auto
+            }
+            if self.manualExposureActive, self.customISO != nil || self.customDuration != nil {
+                self.pipeline.setManualExposure(iso: self.customISO.map { Float($0) }, duration: self.customDuration)
             }
         }
         pipeline.setAspect(aspect)
@@ -422,8 +446,26 @@ final class CameraModel: ObservableObject {
         }
     }
 
+    private var needsPhysical: Bool {
+        focusMode == .manual || manualExposureActive
+    }
+
+    private func updateHardware() {
+        guard captureMode == .standard else { return }
+        pipeline.setPhysicalMode(needsPhysical)
+    }
+
+    func selectLens(_ type: AVCaptureDevice.DeviceType) {
+        pipeline.setPhysicalLens(type)
+        selectionHaptic.selectionChanged()
+    }
+
     func edit(_ control: ProControl) {
         guard let limits = info?.limits else { return }
+        if control != .focus, !manualExposureActive {
+            manualExposureActive = true
+            updateHardware()
+        }
         let r = live.overlay.readout
         switch control {
         case .iso:
@@ -440,17 +482,24 @@ final class CameraModel: ObservableObject {
         isoPosition = t
         guard let limits = info?.limits else { return }
         let iso = Self.value(t, Double(limits.minISO), Double(limits.maxISO))
-        pipeline.setManualExposure(iso: Float(iso), duration: nil)
+        customISO = iso
+        pipeline.setManualExposure(iso: Float(iso), duration: customDuration)
     }
 
     func setShutterPosition(_ t: Double) {
         shutterPosition = t
         guard let limits = info?.limits else { return }
-        pipeline.setManualExposure(iso: nil, duration: Self.value(t, limits.minDuration, limits.maxDuration))
+        let duration = Self.value(t, limits.minDuration, limits.maxDuration)
+        customDuration = duration
+        pipeline.setManualExposure(iso: customISO.map { Float($0) }, duration: duration)
     }
 
     func autoExposure() {
+        manualExposureActive = false
+        customISO = nil
+        customDuration = nil
         pipeline.setAutoExposure()
+        updateHardware()
         selectionHaptic.selectionChanged()
         withAnimation(.easeInOut(duration: 0.2)) { editing = nil }
     }
