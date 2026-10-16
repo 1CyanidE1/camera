@@ -48,6 +48,18 @@ enum RenderPipeline {
         return PhotoProcessor.atOrigin(image)
     }
 
+    static func viewerData(for record: ShotRecord, store: ShotStore) -> Data? {
+        guard let source = RenderSource(record: record, store: store) else { return nil }
+        return render(source, develop: record.develop ?? DevelopParams(), color: record.color, maxSide: 3072, draft: false)
+            .flatMap { encode($0, source: nil, quality: 0.85) }
+    }
+
+    static func fullData(for record: ShotRecord, store: ShotStore) -> Data? {
+        guard let source = RenderSource(record: record, store: store) else { return nil }
+        return render(source, develop: record.develop ?? DevelopParams(), color: record.color, maxSide: nil, draft: false)
+            .flatMap { encode($0, source: source, quality: 0.92) }
+    }
+
     static func uiImage(_ image: CIImage) -> UIImage? {
         guard let cg = PhotoProcessor.context.createCGImage(image, from: image.extent.integral,
                                                             format: .RGBA8, colorSpace: displayColorSpace) else { return nil }

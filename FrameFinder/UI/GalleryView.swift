@@ -9,6 +9,11 @@ struct GalleryView: View {
     @State private var showReasons = true
     @State private var confirmDelete = false
     @State private var editing: ShotRecord?
+    @State private var recheckRunning: UUID?
+    @State private var proposal: (id: UUID, result: RecheckResult)?
+    @State private var exportOffer: UUID?
+    @State private var toast: String?
+    @State private var exporting = false
 
     private var current: ShotRecord? {
         store.shots.first { $0.id == selection } ?? store.shots.first
@@ -20,7 +25,7 @@ struct GalleryView: View {
             if let shot = current {
                 VStack(spacing: 0) {
                     header(shot)
-                    if shot.crop != nil {
+                    if shot.crop != nil || proposalRect(for: shot) != nil {
                         Picker("Вид", selection: $showOriginal) {
                             Text("Кадр").tag(false)
                             Text("Исходник с рамкой").tag(true)
@@ -31,12 +36,20 @@ struct GalleryView: View {
                     }
                     TabView(selection: $selection) {
                         ForEach(store.shots) { item in
-                            ShotPage(shot: item, store: store, showOriginal: showOriginal)
+                            ShotPage(shot: item, store: store, showOriginal: showOriginal,
+                                     proposal: proposalRect(for: item))
                                 .tag(Optional(item.id))
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: .never))
-                    ReasonsCard(shot: shot, expanded: $showReasons)
+                    if let found = proposal, found.id == shot.id {
+                        ProposalCard(result: found.result,
+                                     onUse: { use(found.result, for: shot) },
+                                     onDismiss: { withAnimation { proposal = nil } })
+                    } else {
+                        ReasonsCard(shot: shot, expanded: $showReasons)
+                        recheckButton(shot)
+                    }
                     strip
                 }
             } else {
@@ -51,6 +64,31 @@ struct GalleryView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .overlay(alignment: .bottom) {
+            VStack(spacing: 8) {
+                if let toast {
+                    Text(toast)
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                if let id = exportOffer, let shot = store.shots.first(where: { $0.id == id }) {
+                    Button {
+                        export(shot)
+                    } label: {
+                        Label(exporting ? "Сохраняю…" : "Сохранить новый кадр в Фото", systemImage: "square.and.arrow.down")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Color.yellow, in: Capsule())
+                            .foregroundStyle(.black)
+                    }
+                    .disabled(exporting)
+                }
+            }
+            .padding(.bottom, 90)
+        }
         .onAppear {
             if selection == nil { selection = store.shots.first?.id }
         }
@@ -110,6 +148,105 @@ struct GalleryView: View {
         .padding(.vertical, 10)
     }
 
+    private func proposalRect(for shot: ShotRecord) -> CGRect? {
+        guard let found = proposal, found.id == shot.id else { return nil }
+        return found.result.crop
+    }
+
+    private func recheckButton(_ shot: ShotRecord) -> some View {
+        let available = shot.source != nil && shot.source?.precropped != true
+        return Button {
+            recheck(shot)
+        } label: {
+            HStack(spacing: 8) {
+                if recheckRunning == shot.id {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "sparkle.magnifyingglass")
+                }
+                Text(available ? "Перепроверить кадр" : "Перепроверка недоступна для старых снимков")
+                    .font(.footnote.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .foregroundStyle(.white)
+        .disabled(!available || recheckRunning != nil)
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+    }
+
+    private func recheck(_ shot: ShotRecord) {
+        recheckRunning = shot.id
+        let store = store
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                await Recheck.run(record: shot, store: store)
+            }.value
+            recheckRunning = nil
+            if let result {
+                withAnimation {
+                    proposal = (shot.id, result)
+                    showOriginal = true
+                }
+            } else {
+                show("Твой кадр уже лучший из найденных")
+            }
+        }
+    }
+
+    private func use(_ result: RecheckResult, for shot: ShotRecord) {
+        var updated = shot
+        updated.previousCrop = shot.crop
+        updated.crop = result.crop
+        updated.label = result.label
+        updated.reasons = result.reasons
+        updated.aesthetic = result.aesthetic
+        updated.revision = (shot.revision ?? 0) + 1
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let viewer = RenderPipeline.viewerData(for: updated, store: store)
+            DispatchQueue.main.async {
+                store.update(updated, viewer: viewer, original: nil) {
+                    withAnimation {
+                        proposal = nil
+                        showOriginal = false
+                        exportOffer = updated.id
+                    }
+                    show("Кадр обновлён")
+                }
+            }
+        }
+    }
+
+    private func export(_ shot: ShotRecord) {
+        exporting = true
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let data = RenderPipeline.fullData(for: shot, store: store)
+            let finish: (Bool) -> Void = { ok in
+                DispatchQueue.main.async {
+                    exporting = false
+                    exportOffer = nil
+                    show(ok ? "Сохранено в «Фото»" : "Не удалось сохранить")
+                }
+            }
+            guard let data else {
+                finish(false)
+                return
+            }
+            PhotoLibrary.save([data], completion: finish)
+        }
+    }
+
+    private func show(_ text: String) {
+        withAnimation { toast = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            if toast == text { withAnimation { toast = nil } }
+        }
+    }
+
     private func subtitle(_ shot: ShotRecord) -> String {
         var parts = [shot.label]
         if shot.source?.kind == .proRAW { parts.append("RAW") }
@@ -149,15 +286,16 @@ private struct ShotPage: View {
     let shot: ShotRecord
     let store: ShotStore
     let showOriginal: Bool
+    let proposal: CGRect?
     @State private var image: UIImage?
     @State private var original: UIImage?
     @State private var loadedRevision = 0
 
     var body: some View {
         Group {
-            if showOriginal, let crop = shot.crop {
+            if showOriginal, shot.crop != nil || proposal != nil {
                 if let original {
-                    OriginalWithFrame(image: original, crop: crop)
+                    OriginalWithFrame(image: original, crop: shot.crop ?? .unit, proposal: proposal)
                 } else {
                     ProgressView().tint(.white)
                 }
@@ -186,6 +324,7 @@ private struct ShotPage: View {
 private struct OriginalWithFrame: View {
     let image: UIImage
     let crop: CGRect
+    let proposal: CGRect?
 
     var body: some View {
         Image(uiImage: image)
@@ -195,11 +334,18 @@ private struct OriginalWithFrame: View {
                 GeometryReader { geo in
                     let r = CGRect(x: crop.minX * geo.size.width, y: crop.minY * geo.size.height,
                                    width: crop.width * geo.size.width, height: crop.height * geo.size.height)
+                    let p = proposal.map {
+                        CGRect(x: $0.minX * geo.size.width, y: $0.minY * geo.size.height,
+                               width: $0.width * geo.size.width, height: $0.height * geo.size.height)
+                    }
                     Canvas { ctx, size in
                         var dim = Path(CGRect(origin: .zero, size: size))
-                        dim.addRect(r)
+                        dim.addRect(p ?? r)
                         ctx.fill(dim, with: .color(.black.opacity(0.5)), style: FillStyle(eoFill: true))
                         ctx.stroke(Path(r), with: .color(.yellow), lineWidth: 2)
+                        if let p {
+                            ctx.stroke(Path(p), with: .color(.green), style: StrokeStyle(lineWidth: 2.5, dash: [8, 5]))
+                        }
                     }
                 }
             }
@@ -329,5 +475,43 @@ final class ZoomScrollView: UIScrollView, UIScrollViewDelegate {
             let size = CGSize(width: bounds.width / 2.5, height: bounds.height / 2.5)
             zoom(to: CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height), animated: true)
         }
+    }
+}
+
+private struct ProposalCard: View {
+    let result: RecheckResult
+    let onUse: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "sparkles").foregroundStyle(.green)
+                Text("Нашёл кадр лучше на \(Int(((result.gain - 1) * 100).rounded()))% · \(result.label)")
+                    .font(.subheadline.weight(.semibold))
+            }
+            ReasonList(reasons: Array(result.reasons.prefix(5)))
+            HStack(spacing: 10) {
+                Button(action: onDismiss) {
+                    Text("Оставить мой")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                }
+                Button(action: onUse) {
+                    Text("Использовать")
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Color.green, in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            .font(.footnote.weight(.semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(14)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
     }
 }

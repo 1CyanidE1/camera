@@ -30,7 +30,15 @@ jobs:
         run: bash scripts/fetch_weights.sh work
 
       - name: Convert
-        run: python -I scripts/convert_models.py work FrameFinder/Models
+        run: |
+          set +e
+          python -I scripts/convert_models.py work FrameFinder/Models > convert.log 2>&1
+          status=$?
+          cat convert.log
+          if [ $status -ne 0 ]; then
+            echo "::error title=convert.log::$(tail -45 convert.log | cut -c1-300 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit 1
+          fi
 
       - name: Commit models
         run: |
