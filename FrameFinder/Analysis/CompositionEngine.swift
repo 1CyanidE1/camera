@@ -11,6 +11,9 @@ struct OverlayState: Equatable {
         var locked: Bool
         var aligned: Bool
         var visible: CGFloat
+        var reasons: [ShotReason]
+        var anchor: CGPoint?
+        var faces: [CGRect]
     }
 
     var frame: Frame?
@@ -31,6 +34,9 @@ final class CompositionEngine {
         var compare: Double
         var hiddenSince: Double?
         var captured = false
+        var reasons: [ShotReason] = []
+        var anchor: CGPoint?
+        var faces: [CGRect] = []
     }
 
     private struct AestheticEntry {
@@ -69,6 +75,8 @@ final class CompositionEngine {
         if var c = current {
             c.rect = t(c.rect)
             c.subject = t(CGRect(origin: c.subject, size: .zero)).origin
+            if let a = c.anchor { c.anchor = t(CGRect(origin: a, size: .zero)).origin }
+            c.faces = c.faces.map(t)
             current = c
         }
         if var ch = challenger {
@@ -88,6 +96,7 @@ final class CompositionEngine {
             }
             return
         }
+        defer { explain(with: scorer) }
         let ratios = aspectMode.ratios
         candidates = scorer.search(ratios: ratios, imageAspect: imageAspect)
         guard let top = candidates.first else { return }
@@ -160,6 +169,17 @@ final class CompositionEngine {
         }
     }
 
+    private func explain(with scorer: CompositionScorer) {
+        guard var c = current, CGRect.unit.coverage(of: c.rect) > 0.92 else { return }
+        let rect = c.rect.clampedInsideUnit()
+        let b = scorer.breakdown(rect, ratio: c.ratio)
+        let whole = scorer.breakdown(.unit, ratio: up.isLandscape ? 4.0 / 3.0 : 3.0 / 4.0).value
+        c.reasons = Explainer.reasons(for: b, wholeValue: whole, aesthetic: aestheticScore(for: c.rect))
+        c.anchor = b.anchor
+        c.faces = scorer.wholeFaces(in: rect)
+        current = c
+    }
+
     private func adopt(_ c: Candidate, compare: Double) {
         current = Suggestion(id: nextId, rect: c.rect, ratio: c.ratio, subject: c.subject, compare: compare, hiddenSince: nil)
         nextId += 1
@@ -228,7 +248,10 @@ final class CompositionEngine {
             aesthetic: aestheticScore(for: c.rect),
             locked: locked,
             aligned: shown.iou(.unit) > 0.8,
-            visible: CGRect.unit.coverage(of: shown)
+            visible: CGRect.unit.coverage(of: shown),
+            reasons: c.reasons,
+            anchor: c.anchor,
+            faces: c.faces
         )
     }
 }

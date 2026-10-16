@@ -23,6 +23,9 @@ struct ContentView: View {
             }
         }
         .onAppear { model.start() }
+        .fullScreenCover(isPresented: $model.showGallery, onDismiss: model.refreshThumbnail) {
+            GalleryView(store: model.shots)
+        }
     }
 
     private var camera: some View {
@@ -40,7 +43,11 @@ struct ContentView: View {
         GeometryReader { geo in
             ZStack {
                 CameraPreview(session: model.pipeline.session, ready: model.info != nil)
-                FrameOverlay(live: model.live)
+                FrameOverlay(live: model.live, explain: model.explain)
+                if model.explain {
+                    ExplainPanel(live: model.live)
+                        .transition(.opacity)
+                }
                 if let p = model.focusMarker {
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(Color.yellow, lineWidth: 1.5)
@@ -110,6 +117,16 @@ private struct TopBar: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Spacer(minLength: 0)
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { model.explain.toggle() }
+            } label: {
+                Image(systemName: model.explain ? "questionmark.circle.fill" : "questionmark.circle")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(model.explain ? Color.yellow : Color.white)
+                    .frame(width: 34, height: 30)
+                    .background(.white.opacity(0.12), in: Capsule())
+            }
 
             Menu {
                 Toggle("Сохранять и оригинал", isOn: $model.saveOriginal)
@@ -198,7 +215,7 @@ private struct BottomBar: View {
     var body: some View {
         HStack {
             Button {
-                if let url = URL(string: "photos-redirect://") { UIApplication.shared.open(url) }
+                model.showGallery = true
             } label: {
                 Group {
                     if let image = model.thumbnail {

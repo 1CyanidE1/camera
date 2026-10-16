@@ -1,6 +1,26 @@
 import CoreGraphics
 import Foundation
 
+struct Breakdown {
+    enum Placement { case thirds, center }
+
+    var value = 0.0
+    var subject: CGPoint
+    var area: Double
+    var coverage = 0.0
+    var placement = Placement.thirds
+    var placementQuality = 0.0
+    var anchor: CGPoint?
+    var edgeClear = 1.0
+    var subjectsWhole = 0
+    var subjectsCut = 0
+    var facesWhole = 0
+    var facesCut = 0
+    var headroomOK: Bool?
+    var eyeLineOK: Bool?
+    var bodiesCut = 0
+}
+
 struct Candidate {
     var rect: CGRect
     var raw: Double
@@ -130,43 +150,74 @@ final class CompositionScorer {
     }
 
     func score(_ r: CGRect, ratio: Double) -> (value: Double, subject: CGPoint) {
-        let area = Double(r.width * r.height)
-        guard area > 0.02 else { return (0, r.center) }
-        let m = mass(r)
-        guard m > total * 0.03 else { return (0, r.center) }
-        let subject = CGPoint(x: sum(satX, r) / m, y: sum(satY, r) / m)
+        let b = breakdown(r, ratio: ratio)
+        return (b.value, b.subject)
+    }
 
-        let coverage = m / total
-        let density = coverage / area
-        var s = coverage * pow(density, 0.35)
+    func wholeFaces(in r: CGRect) -> [CGRect] {
+        faces.filter { r.coverage(of: $0) >= 0.98 }
+    }
+
+    func breakdown(_ r: CGRect, ratio: Double) -> Breakdown {
+        var b = Breakdown(subject: r.center, area: Double(r.width * r.height))
+        guard b.area > 0.02 else { return b }
+        let m = mass(r)
+        guard m > total * 0.03 else { return b }
+        let subject = CGPoint(x: sum(satX, r) / m, y: sum(satY, r) / m)
+        b.subject = subject
+
+        b.coverage = m / total
+        let density = b.coverage / b.area
+        var s = b.coverage * pow(density, 0.35)
 
         let ur = up.toUpright(r)
         let us = up.toUpright(subject)
         let u = Double((us.x - ur.minX) / ur.width)
         let v = Double((us.y - ur.minY) / ur.height)
         var d2 = Double.greatestFiniteMagnitude
+        var point = (x: 0.5, y: 0.5)
         for px in [1.0 / 3, 2.0 / 3] {
             for py in [1.0 / 3, 2.0 / 3] {
-                d2 = min(d2, (u - px) * (u - px) + (v - py) * (v - py))
+                let d = (u - px) * (u - px) + (v - py) * (v - py)
+                if d < d2 {
+                    d2 = d
+                    point = (px, py)
+                }
             }
         }
         let thirds = exp(-d2 / (2 * 0.09 * 0.09))
         let du = u - 0.5, dv = v - 0.5
         let centred = exp(-(du * du + dv * dv) / (2 * 0.07 * 0.07))
+        if 0.8 * centred > thirds {
+            b.placement = .center
+            b.placementQuality = centred
+            point = (0.5, 0.5)
+        } else {
+            b.placement = .thirds
+            b.placementQuality = thirds
+        }
+        b.anchor = up.fromUpright(CGPoint(x: Double(ur.minX) + point.x * Double(ur.width),
+                                          y: Double(ur.minY) + point.y * Double(ur.height)))
         s *= 0.5 + 0.5 * max(thirds, 0.8 * centred)
 
         let band = 0.08 * min(r.width, r.height)
         let inner = r.insetBy(dx: band, dy: band)
-        let bandArea = area - Double(inner.area)
+        let bandArea = b.area - Double(inner.area)
         if bandArea > 1e-4 {
             let edgeDensity = (m - mass(inner)) / bandArea
-            let relative = edgeDensity / (m / area)
-            s *= exp(-max(0, relative - 0.5) * 1.5)
+            let relative = edgeDensity / (m / b.area)
+            b.edgeClear = exp(-max(0, relative - 0.5) * 1.5)
+            s *= b.edgeClear
         }
 
         for box in subjects {
             let f = Double(r.coverage(of: box))
-            if f > 0.03 && f < 0.97 { s *= 1 - 0.45 * sin(.pi * f) }
+            if f > 0.03 && f < 0.97 {
+                s *= 1 - 0.45 * sin(.pi * f)
+                b.subjectsCut += 1
+            } else if f >= 0.97 {
+                b.subjectsWhole += 1
+            }
         }
 
         var mainFace: CGRect?
@@ -174,27 +225,36 @@ final class CompositionScorer {
             let f = Double(r.coverage(of: face))
             if f > 0.03 && f < 0.98 {
                 s *= 0.3
-            } else if f >= 0.98, face.area > (mainFace?.area ?? 0) {
-                mainFace = face
+                b.facesCut += 1
+            } else if f >= 0.98 {
+                b.facesWhole += 1
+                if face.area > (mainFace?.area ?? 0) { mainFace = face }
             }
         }
         if let face = mainFace {
             let uf = up.toUpright(face)
             let headroom = Double((uf.minY - ur.minY) / ur.height)
             let eyeLine = Double((uf.midY - ur.minY) / ur.height)
+            b.headroomOK = headroom >= 0.04
             if headroom < 0.04 { s *= 0.7 }
-            s *= 0.75 + 0.25 * exp(-pow(eyeLine - 0.36, 2) / (2 * 0.12 * 0.12))
+            let eyeScore = exp(-pow(eyeLine - 0.36, 2) / (2 * 0.12 * 0.12))
+            b.eyeLineOK = eyeScore > 0.6
+            s *= 0.75 + 0.25 * eyeScore
         } else {
             for body in bodies {
                 let f = Double(r.coverage(of: body))
-                if f > 0.2 && f < 0.92 { s *= 0.8 }
+                if f > 0.2 && f < 0.92 {
+                    s *= 0.8
+                    b.bodiesCut += 1
+                }
             }
         }
 
-        if area < 0.3 { s *= pow(area / 0.3, 1.2) }
+        if b.area < 0.3 { s *= pow(b.area / 0.3, 1.2) }
 
         s *= Self.ratioPrior(ratio)
-        return (s, subject)
+        b.value = s
+        return b
     }
 
     private static func ratioPrior(_ r: Double) -> Double {

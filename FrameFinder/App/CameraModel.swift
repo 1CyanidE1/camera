@@ -28,9 +28,14 @@ final class CameraModel: ObservableObject {
     @Published var flash = false
     @Published var busy = false
     @Published var focusMarker: CGPoint?
+    @Published var showGallery = false
+    @Published var explain = UserDefaults.standard.bool(forKey: "explain") {
+        didSet { UserDefaults.standard.set(explain, forKey: "explain") }
+    }
 
     let live = LiveState()
     let pipeline = CameraPipeline()
+    let shots = ShotStore()
 
     private let motion = CMMotionManager()
     private var up: UpDirection = .top
@@ -43,6 +48,14 @@ final class CameraModel: ObservableObject {
     private let mediumHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .rigid)
     private let successHaptic = UINotificationFeedbackGenerator()
+
+    init() {
+        thumbnail = shots.latestThumbnail()
+    }
+
+    func refreshThumbnail() {
+        thumbnail = shots.latestThumbnail()
+    }
 
     func start() {
         guard !started else { return }
@@ -137,18 +150,27 @@ final class CameraModel: ObservableObject {
             let r = frame.rect.intersection(.unit)
             if r.iou(.unit) < 0.96 { crop = r }
         }
-        let label = frame?.label ?? ""
+        let label = crop == nil ? "Целиком" : (frame?.label ?? "")
+        let record = ShotRecord(id: UUID(), date: Date(), label: label,
+                                aesthetic: crop == nil ? nil : frame?.aesthetic,
+                                crop: crop.map { up.toUpright($0) },
+                                reasons: crop == nil ? [] : (frame?.reasons ?? []))
 
         pipeline.capture(crop: crop, rotation: PhotoRotation(up: up), saveOriginal: saveOriginal,
                          willCapture: { [weak self] in self?.blink() },
-                         completion: { [weak self] image, ok in
+                         completion: { [weak self] shot, savedToPhotos in
             guard let self else { return }
             self.busy = false
-            if ok {
-                if let image { self.thumbnail = image }
-                self.show(crop == nil ? "Сохранено в «Фото»" : "Сохранено · кроп \(label)")
+            guard let shot else {
+                self.show("Не удалось обработать снимок")
+                return
+            }
+            self.shots.add(record, viewer: shot.viewer, original: shot.original)
+            if let image = shot.thumbnail { self.thumbnail = image }
+            if savedToPhotos {
+                self.show(crop == nil ? "Сохранено" : "Сохранено · кадр \(label)")
             } else {
-                self.show("Не сохранилось — разреши доступ к «Фото» в Настройках")
+                self.show("Снимок в приложении, но не в «Фото» — разреши доступ в Настройках")
             }
         })
     }

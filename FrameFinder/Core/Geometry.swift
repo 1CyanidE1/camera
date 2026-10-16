@@ -56,6 +56,15 @@ enum UpDirection: Equatable {
         }
     }
 
+    func fromUpright(_ p: CGPoint) -> CGPoint {
+        switch self {
+        case .top: return p
+        case .right: return CGPoint(x: 1 - p.y, y: p.x)
+        case .left: return CGPoint(x: p.y, y: 1 - p.x)
+        case .bottom: return CGPoint(x: 1 - p.x, y: 1 - p.y)
+        }
+    }
+
     func toUpright(_ r: CGRect) -> CGRect {
         let a = toUpright(CGPoint(x: r.minX, y: r.minY))
         let b = toUpright(CGPoint(x: r.maxX, y: r.maxY))

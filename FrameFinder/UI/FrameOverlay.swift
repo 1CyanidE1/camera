@@ -2,12 +2,13 @@ import SwiftUI
 
 struct FrameOverlay: View {
     @ObservedObject var live: LiveState
+    let explain: Bool
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 if let frame = live.overlay.frame {
-                    FrameDrawing(frame: frame, size: geo.size)
+                    FrameDrawing(frame: frame, size: geo.size, explain: explain)
                         .id(frame.id)
                         .transition(.opacity.combined(with: .scale(scale: 1.03)))
                 }
@@ -25,6 +26,15 @@ struct FrameOverlay: View {
 private struct FrameDrawing: View {
     let frame: OverlayState.Frame
     let size: CGSize
+    let explain: Bool
+
+    private func point(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: p.x * size.width, y: p.y * size.height)
+    }
+
+    private func box(_ r: CGRect) -> CGRect {
+        CGRect(x: r.minX * size.width, y: r.minY * size.height, width: r.width * size.width, height: r.height * size.height)
+    }
 
     private var rect: CGRect {
         CGRect(x: frame.rect.minX * size.width, y: frame.rect.minY * size.height,
@@ -41,6 +51,10 @@ private struct FrameDrawing: View {
         let color = tint
         let aligned = frame.aligned
         let offscreen = frame.visible < 0.5
+        let showMarks = explain && !offscreen
+        let subject = point(frame.subject)
+        let anchor = frame.anchor.map(point)
+        let faces = frame.faces.map(box)
 
         ZStack(alignment: .topLeading) {
             Canvas { ctx, canvas in
@@ -80,9 +94,24 @@ private struct FrameDrawing: View {
                 shadowed.addFilter(.shadow(color: .black.opacity(0.5), radius: 3))
                 shadowed.stroke(corners, with: .color(color), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
 
+                if showMarks {
+                    for face in faces {
+                        ctx.stroke(Path(roundedRect: face, cornerRadius: 6), with: .color(.yellow.opacity(0.9)), lineWidth: 1.5)
+                    }
+                    if let anchor {
+                        var link = Path()
+                        link.move(to: subject)
+                        link.addLine(to: anchor)
+                        ctx.stroke(link, with: .color(.yellow.opacity(0.8)), lineWidth: 1)
+                        ctx.stroke(Path(ellipseIn: CGRect(x: anchor.x - 13, y: anchor.y - 13, width: 26, height: 26)),
+                                   with: .color(.yellow), lineWidth: 2)
+                    }
+                    ctx.fill(Path(ellipseIn: CGRect(x: subject.x - 4, y: subject.y - 4, width: 8, height: 8)), with: .color(.yellow))
+                }
+
                 let c = CGPoint(x: full.midX, y: full.midY)
                 let t = CGPoint(x: r.midX, y: r.midY)
-                if !aligned && !offscreen && hypot(t.x - c.x, t.y - c.y) > min(full.width, full.height) * 0.06 {
+                if !aligned && !offscreen && !showMarks && hypot(t.x - c.x, t.y - c.y) > min(full.width, full.height) * 0.06 {
                     var line = Path()
                     line.move(to: c)
                     line.addLine(to: t)
@@ -154,5 +183,52 @@ struct LevelIndicator: View {
         .foregroundStyle(isLevel ? Color.yellow : Color.white.opacity(0.7))
         .shadow(color: .black.opacity(0.4), radius: 2)
         .animation(.easeOut(duration: 0.15), value: isLevel)
+    }
+}
+
+struct ReasonList: View {
+    let reasons: [ShotReason]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(reasons, id: \.self) { reason in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: reason.symbol)
+                        .foregroundStyle(reason.good ? Color.green : Color.orange)
+                        .frame(width: 20)
+                    Text(reason.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(.footnote)
+    }
+}
+
+struct ExplainPanel: View {
+    @ObservedObject var live: LiveState
+
+    var body: some View {
+        VStack {
+            Spacer()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Почему этот кадр")
+                    .font(.footnote.weight(.semibold))
+                if let frame = live.overlay.frame, !frame.reasons.isEmpty {
+                    ReasonList(reasons: Array(frame.reasons.prefix(5)))
+                } else {
+                    Text("Ищу кадр — объясню, как только найду")
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+            .padding(10)
+        }
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.25), value: live.overlay.frame?.reasons)
     }
 }

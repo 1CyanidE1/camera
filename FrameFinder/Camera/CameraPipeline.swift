@@ -193,7 +193,7 @@ final class CameraPipeline: NSObject {
 
     func capture(crop: CGRect?, rotation: PhotoRotation, saveOriginal: Bool,
                  willCapture: @escaping () -> Void,
-                 completion: @escaping (UIImage?, Bool) -> Void) {
+                 completion: @escaping (ProcessedShot?, Bool) -> Void) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             guard self.session.isRunning, self.photoOutput.connection(with: .video) != nil else {
