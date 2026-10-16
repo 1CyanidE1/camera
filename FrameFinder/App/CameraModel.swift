@@ -73,6 +73,16 @@ final class CameraModel: ObservableObject {
         }
     }
     @Published var showGallery = false
+    @Published var autoShutter = UserDefaults.standard.bool(forKey: "autoShutter") {
+        didSet {
+            UserDefaults.standard.set(autoShutter, forKey: "autoShutter")
+            pipeline.setFaceQuality(autoShutter)
+            countdownStart = nil
+            firedFrameId = nil
+            if autoProgress != nil { autoProgress = nil }
+        }
+    }
+    @Published var autoProgress: Double?
     @Published var explain = UserDefaults.standard.bool(forKey: "explain") {
         didSet { UserDefaults.standard.set(explain, forKey: "explain") }
     }
@@ -88,6 +98,12 @@ final class CameraModel: ObservableObject {
     private var lastFrameId: Int?
     private var wasAligned = false
     private var biasStart: Float = 0
+    private var steadySince: CFTimeInterval?
+    private var lastMotionTime: CFTimeInterval = 0
+    private var frameSince: (id: Int, time: CFTimeInterval)?
+    private var countdownStart: CFTimeInterval?
+    private var firedFrameId: Int?
+    private var moveSinceShot = 0.0
     private var markerToken = 0
 
     private let lightHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -131,6 +147,7 @@ final class CameraModel: ObservableObject {
         pipeline.setAspect(aspect)
         pipeline.setFocusMode(focusMode)
         pipeline.setAssist(assist)
+        pipeline.setFaceQuality(autoShutter)
         pipeline.configure()
         startMotion()
     }
@@ -147,14 +164,72 @@ final class CameraModel: ObservableObject {
         wasAligned = aligned
 
         if live.overlay != state { live.overlay = state }
+        evaluateAutoShutter(state)
+    }
+
+    private func evaluateAutoShutter(_ state: OverlayState) {
+        let now = CACurrentMediaTime()
+        guard autoShutter, phase == .running, !busy, !showGallery, editing == nil, let frame = state.frame else {
+            cancelCountdown()
+            return
+        }
+        if frameSince?.id != frame.id { frameSince = (frame.id, now) }
+        if let fired = firedFrameId {
+            if frame.id != fired || moveSinceShot > 0.35 {
+                firedFrameId = nil
+            } else {
+                cancelCountdown()
+                return
+            }
+        }
+        let steady = steadySince.map { now - $0 >= 0.6 } ?? false
+        let ready = now - (frameSince?.time ?? now) >= 1.2
+            && frame.visible >= 0.9
+            && steady
+            && !state.readout.adjustingFocus
+            && !state.readout.adjustingExposure
+            && state.faceOK
+        guard ready else {
+            cancelCountdown()
+            return
+        }
+        let start = countdownStart ?? now
+        countdownStart = start
+        let progress = (now - start) / 1.5
+        if progress >= 1 {
+            cancelCountdown()
+            firedFrameId = frame.id
+            moveSinceShot = 0
+            shoot()
+        } else if abs((autoProgress ?? -1) - progress) > 0.02 {
+            autoProgress = progress
+        }
+    }
+
+    private func cancelCountdown() {
+        countdownStart = nil
+        if autoProgress != nil { autoProgress = nil }
     }
 
     private func startMotion() {
         guard motion.isDeviceMotionAvailable else { return }
         motion.deviceMotionUpdateInterval = 1.0 / 20
         motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
-            guard let self, let g = data?.gravity else { return }
-            self.handleGravity(g)
+            guard let self, let data else { return }
+            self.handleRotation(data.rotationRate)
+            self.handleGravity(data.gravity)
+        }
+    }
+
+    private func handleRotation(_ rate: CMRotationRate) {
+        let now = CACurrentMediaTime()
+        let speed = (rate.x * rate.x + rate.y * rate.y + rate.z * rate.z).squareRoot()
+        if lastMotionTime > 0 { moveSinceShot += speed * min(now - lastMotionTime, 0.2) }
+        lastMotionTime = now
+        if speed < 0.08 {
+            if steadySince == nil { steadySince = now }
+        } else {
+            steadySince = nil
         }
     }
 

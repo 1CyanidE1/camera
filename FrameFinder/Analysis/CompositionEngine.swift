@@ -20,6 +20,7 @@ struct OverlayState: Equatable {
     var zoom: CGFloat = 1
     var readout = CameraReadout()
     var histogram: [UInt8] = []
+    var faceOK = true
 }
 
 final class CompositionEngine {

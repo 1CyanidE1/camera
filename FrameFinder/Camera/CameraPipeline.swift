@@ -31,6 +31,7 @@ final class CameraPipeline: NSObject {
 
     private let focusControl = FocusExposureController()
     private var lastEyes: [CGPoint] = []
+    private var faceOK = true
     private var manualExposure = false
 
     private var assistOptions = AssistOptions()
@@ -237,6 +238,10 @@ final class CameraPipeline: NSObject {
         videoQueue.async { self.forcePeaking = on }
     }
 
+    func setFaceQuality(_ enabled: Bool) {
+        videoQueue.async { self.analyzer.qualityEnabled = enabled }
+    }
+
     func setLoupe(_ point: CGPoint?) {
         videoQueue.async { self.loupePoint = point }
     }
@@ -391,6 +396,8 @@ extension CameraPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
             if let scene = analyzer.analyze(pixelBuffer) {
                 engine.ingest(scene, now: now)
                 lastEyes = scene.eyes
+                faceOK = scene.faces.isEmpty
+                    || ((scene.faceQuality ?? 1) >= 0.35 && scene.eyesOpen && scene.maxYaw < 0.61)
             }
             if now - lastAesthetics >= aestheticsInterval, !aestheticsBusy, aestheticsFailures < 5 {
                 runAesthetics(on: pixelBuffer, now: now)
@@ -406,6 +413,7 @@ extension CameraPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
         runAssist(pixelBuffer, now: now)
         state.histogram = assistOptions.histogram ? histogram : []
+        state.faceOK = faceOK
         let callback = onOverlay
         DispatchQueue.main.async { callback?(state) }
     }

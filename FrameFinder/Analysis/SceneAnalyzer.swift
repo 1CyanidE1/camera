@@ -12,6 +12,9 @@ struct SceneAnalysis {
     var faces: [CGRect]
     var bodies: [CGRect]
     var eyes: [CGPoint] = []
+    var faceQuality: Float?
+    var eyesOpen = true
+    var maxYaw = 0.0
 }
 
 final class SceneAnalyzer {
@@ -23,8 +26,12 @@ final class SceneAnalyzer {
         request.upperBodyOnly = false
         return request
     }()
+    private let qualityRequest = VNDetectFaceCaptureQualityRequest()
     private var lastLandmarks: CFTimeInterval = 0
     private var cachedEyes: [CGPoint] = []
+    private var cachedQuality: Float?
+    private var cachedEyesOpen = true
+    var qualityEnabled = false
 
     func analyze(_ pixelBuffer: CVPixelBuffer) -> SceneAnalysis? {
         run(VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:]), landmarksEvery: 0.3)
@@ -66,20 +73,36 @@ final class SceneAnalyzer {
         let now = CACurrentMediaTime()
         if faceObservations.isEmpty {
             cachedEyes = []
+            cachedQuality = nil
+            cachedEyesOpen = true
         } else if now - lastLandmarks >= interval {
             lastLandmarks = now
             landmarksRequest.inputFaceObservations = faceObservations
             if (try? handler.perform([landmarksRequest])) != nil {
-                cachedEyes = (landmarksRequest.results ?? []).compactMap(Self.sharpestEye)
+                let results = landmarksRequest.results ?? []
+                cachedEyes = results.compactMap(Self.sharpestEye)
+                cachedEyesOpen = results.allSatisfy(Self.eyesOpen)
+            }
+            if qualityEnabled {
+                qualityRequest.inputFaceObservations = faceObservations
+                if (try? handler.perform([qualityRequest])) != nil {
+                    cachedQuality = (qualityRequest.results ?? []).compactMap { Self.number($0.faceCaptureQuality) }.min().map { Float($0) }
+                }
+            } else {
+                cachedQuality = nil
             }
         }
+        let maxYaw = faceObservations.compactMap { Self.number($0.yaw) }.map { abs($0) }.max() ?? 0
 
         return SceneAnalysis(
             heat: heat, gw: w, gh: h, peak: peak,
             subjects: (saliency.salientObjects ?? []).map { Self.topLeft($0.boundingBox) },
             faces: faceObservations.map { Self.topLeft($0.boundingBox) },
             bodies: (humanRequest.results ?? []).map { Self.topLeft($0.boundingBox) },
-            eyes: cachedEyes
+            eyes: cachedEyes,
+            faceQuality: cachedQuality,
+            eyesOpen: cachedEyesOpen,
+            maxYaw: maxYaw
         )
     }
 
@@ -96,6 +119,31 @@ final class SceneAnalyzer {
         }
         guard let best = eyes.max(by: { $0.1 < $1.1 }) else { return nil }
         return CGPoint(x: box.minX + best.0.x * box.width, y: 1 - (box.minY + best.0.y * box.height))
+    }
+
+    private static func number(_ value: NSNumber?) -> Double? {
+        value?.doubleValue
+    }
+
+    private static func number(_ value: Float?) -> Double? {
+        value.map { Double($0) }
+    }
+
+    private static func number(_ value: Double?) -> Double? {
+        value
+    }
+
+    private static func eyesOpen(_ face: VNFaceObservation) -> Bool {
+        guard let landmarks = face.landmarks else { return true }
+        let ratios = [landmarks.leftEye, landmarks.rightEye].compactMap { region -> CGFloat? in
+            guard let region, region.pointCount > 2 else { return nil }
+            let points = region.normalizedPoints
+            let xs = points.map(\.x), ys = points.map(\.y)
+            guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max(), maxX > minX else { return nil }
+            return (maxY - minY) / (maxX - minX)
+        }
+        guard !ratios.isEmpty else { return true }
+        return (ratios.max() ?? 1) >= 0.15
     }
 
     private static func topLeft(_ r: CGRect) -> CGRect {

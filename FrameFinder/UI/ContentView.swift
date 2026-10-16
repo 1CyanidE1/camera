@@ -164,6 +164,19 @@ private struct TopBar: View {
             Spacer(minLength: 0)
 
             Button {
+                model.autoShutter.toggle()
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "timer")
+                    Text("A")
+                }
+                .font(.footnote.weight(.bold))
+                .foregroundStyle(model.autoShutter ? Color.yellow : Color.white)
+                .frame(width: 44, height: 30)
+                .background(.white.opacity(0.12), in: Capsule())
+            }
+
+            Button {
                 withAnimation(.easeInOut(duration: 0.2)) { model.explain.toggle() }
             } label: {
                 Image(systemName: model.explain ? "questionmark.circle.fill" : "questionmark.circle")
@@ -191,11 +204,13 @@ private struct TopBar: View {
     }
 
     private var status: String {
-        guard let frame = live.overlay.frame else { return "Ищу удачный кадр…" }
-        if frame.aligned { return "Идеально — снимай!" }
-        if frame.visible < 0.5 { return "Кадр ушёл — вернись по стрелке" }
+        guard let frame = live.overlay.frame else { return "Ищу кадр…" }
+        if model.autoProgress != nil { return "Снимаю…" }
+        if frame.aligned { return "Идеально!" }
+        if frame.visible < 0.5 { return "Вернись по стрелке" }
         if frame.locked { return "Рамка закреплена" }
-        return "Жми спуск — кадр обрежется сам"
+        if model.autoShutter { return "Автоспуск ждёт" }
+        return "Жми — обрежу сам"
     }
 
     private var statusColor: Color {
@@ -281,6 +296,13 @@ private struct BottomBar: View {
             Button(action: model.shoot) {
                 ZStack {
                     Circle().stroke(Color.white, lineWidth: 4).frame(width: 78, height: 78)
+                    if let progress = model.autoProgress {
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(Color.yellow, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: 78, height: 78)
+                    }
                     Circle()
                         .fill(live.overlay.frame?.aligned == true ? Color.green : Color.white)
                         .frame(width: 64, height: 64)
