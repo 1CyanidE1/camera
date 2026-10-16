@@ -1,0 +1,39 @@
+name: FrameFinder
+options:
+  bundleIdPrefix: app.kadr
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+targets:
+  FrameFinder:
+    type: application
+    platform: iOS
+    sources:
+      - path: FrameFinder
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: Кадр
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSCameraUsageDescription: Камера нужна, чтобы искать удачный кадр в реальном времени.
+        NSPhotoLibraryAddUsageDescription: Чтобы сохранять готовые снимки в «Фото».
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.kadr.framefinder
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_PREVIEWS: NO

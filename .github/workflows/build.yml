@@ -1,0 +1,63 @@
+name: Build iPhone app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -project FrameFinder.xcodeproj \
+            -target FrameFinder \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build > build.log 2>&1 || true
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)" build.log | head -100 || true
+          if [ ! -d build/Release-iphoneos/FrameFinder.app ]; then
+            grep -E "^/.*: error: " build.log | sort -u | head -40 \
+              | sed -E 's#^.*/(FrameFinder/[^:]+):([0-9]+):([0-9]+): error: (.*)$#\1:\2:\3: \4#' > errors.txt || true
+            if [ -s errors.txt ]; then
+              echo "::error title=Swift errors::$(sed 's/%/%25/g' errors.txt | awk '{printf "%s%%0A", $0}')"
+            fi
+            echo "::error title=build.log tail::$(tail -40 build.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit 1
+          fi
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/FrameFinder.app Payload/
+          zip -qry FrameFinder.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameFinder-ipa
+          path: FrameFinder.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
