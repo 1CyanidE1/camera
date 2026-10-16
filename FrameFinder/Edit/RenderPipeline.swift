@@ -99,7 +99,6 @@ enum RenderPipeline {
                 filter.boostAmount = 0
                 if filter.isLocalToneMapSupported { filter.localToneMapAmount = 0 }
             }
-            if filter.isHighlightRecoverySupported { filter.isHighlightRecoveryEnabled = true }
             guard let output = filter.outputImage else { return nil }
             return output.oriented(exifOrientation(of: source.url))
         case .heic:
