@@ -3,6 +3,11 @@ import CoreMotion
 import SwiftUI
 import UIKit
 
+struct FocusMarker: Equatable {
+    var point: CGPoint
+    var locked: Bool
+}
+
 struct LevelState: Equatable {
     var visible = false
     var angle: Double = 0
@@ -27,7 +32,17 @@ final class CameraModel: ObservableObject {
     @Published var toast: String?
     @Published var flash = false
     @Published var busy = false
-    @Published var focusMarker: CGPoint?
+    @Published var focusMarker: FocusMarker?
+    @Published var exposureBias: Float = 0
+    @Published var adjustingBias = false
+    @Published var focusMode = FocusMode(rawValue: UserDefaults.standard.string(forKey: "focusMode") ?? "") ?? .auto {
+        didSet {
+            UserDefaults.standard.set(focusMode.rawValue, forKey: "focusMode")
+            pipeline.setFocusMode(focusMode)
+            exposureBias = 0
+            withAnimation(.easeOut(duration: 0.2)) { focusMarker = nil }
+        }
+    }
     @Published var showGallery = false
     @Published var explain = UserDefaults.standard.bool(forKey: "explain") {
         didSet { UserDefaults.standard.set(explain, forKey: "explain") }
@@ -43,11 +58,14 @@ final class CameraModel: ObservableObject {
     private var pinchBase: CGFloat?
     private var lastFrameId: Int?
     private var wasAligned = false
+    private var biasStart: Float = 0
+    private var markerToken = 0
 
     private let lightHaptic = UIImpactFeedbackGenerator(style: .light)
     private let mediumHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .rigid)
     private let successHaptic = UINotificationFeedbackGenerator()
+    private let selectionHaptic = UISelectionFeedbackGenerator()
 
     init() {
         thumbnail = shots.latestThumbnail()
@@ -82,6 +100,7 @@ final class CameraModel: ObservableObject {
             self.phase = info == nil ? .failed : .running
         }
         pipeline.setAspect(aspect)
+        pipeline.setFocusMode(focusMode)
         pipeline.configure()
         startMotion()
     }
@@ -90,7 +109,6 @@ final class CameraModel: ObservableObject {
         let frame = state.frame
         if let frame, frame.id != lastFrameId {
             lightHaptic.impactOccurred(intensity: 0.6)
-            pipeline.focus(at: frame.subject)
         }
         lastFrameId = frame?.id
 
@@ -225,15 +243,52 @@ final class CameraModel: ObservableObject {
     }
 
     func tap(at point: CGPoint) {
-        if let frame = live.overlay.frame, frame.rect.contains(point) {
-            toggleLock()
-            return
-        }
-        pipeline.focus(at: point)
+        pipeline.tapFocus(at: point)
         lightHaptic.impactOccurred()
-        withAnimation(.easeOut(duration: 0.15)) { focusMarker = point }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            if self.focusMarker == point { withAnimation { self.focusMarker = nil } }
+        exposureBias = 0
+        showMarker(FocusMarker(point: point, locked: false))
+    }
+
+    func longPress(at point: CGPoint) {
+        pipeline.lockFocus(at: point)
+        mediumHaptic.impactOccurred()
+        exposureBias = 0
+        showMarker(FocusMarker(point: point, locked: true))
+    }
+
+    func unlockFocus() {
+        pipeline.unlockFocus()
+        withAnimation(.easeOut(duration: 0.2)) { focusMarker = nil }
+    }
+
+    var canAdjustBias: Bool { focusMarker != nil }
+
+    func biasDrag(_ translation: CGFloat, ended: Bool) {
+        if !adjustingBias {
+            adjustingBias = true
+            biasStart = exposureBias
+        }
+        let value = min(max(biasStart - Float(translation / 110), -2), 2)
+        let stepped = (value * 10).rounded() / 10
+        if stepped != exposureBias {
+            exposureBias = stepped
+            pipeline.setExposureBias(stepped)
+            if stepped == 0 { selectionHaptic.selectionChanged() }
+        }
+        if ended {
+            adjustingBias = false
+            if let marker = focusMarker { showMarker(marker) }
+        }
+    }
+
+    private func showMarker(_ marker: FocusMarker) {
+        withAnimation(.easeOut(duration: 0.15)) { focusMarker = marker }
+        markerToken += 1
+        let token = markerToken
+        guard !marker.locked else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            guard self.markerToken == token, !self.adjustingBias else { return }
+            withAnimation(.easeOut(duration: 0.3)) { self.focusMarker = nil }
         }
     }
 }

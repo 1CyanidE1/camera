@@ -32,6 +32,7 @@ struct ContentView: View {
         VStack(spacing: 14) {
             TopBar(model: model, live: model.live)
             viewfinder
+            ProBar(model: model, live: model.live)
             Spacer(minLength: 0)
             ZoomBar(model: model, live: model.live)
             BottomBar(model: model, live: model.live)
@@ -48,12 +49,32 @@ struct ContentView: View {
                     ExplainPanel(live: model.live)
                         .transition(.opacity)
                 }
-                if let p = model.focusMarker {
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color.yellow, lineWidth: 1.5)
-                        .frame(width: 64, height: 64)
-                        .position(x: p.x * geo.size.width, y: p.y * geo.size.height)
-                        .allowsHitTesting(false)
+                ViewfinderGestures(
+                    onTap: { model.tap(at: $0) },
+                    onLongPress: { model.longPress(at: $0) },
+                    canPan: { model.canAdjustBias },
+                    onPan: { model.biasDrag($0, ended: $1) },
+                    onPinch: { scale, ended in
+                        if ended { model.pinchEnded() } else { model.pinchChanged(scale) }
+                    }
+                )
+                if let marker = model.focusMarker {
+                    FocusMarkerView(marker: marker, bias: model.exposureBias,
+                                    adjusting: model.adjustingBias, size: geo.size)
+                        .transition(.opacity)
+                }
+                if model.focusMarker?.locked == true {
+                    VStack {
+                        Text("AE/AF ЗАФИКСИРОВАНО")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.yellow, in: RoundedRectangle(cornerRadius: 4))
+                            .padding(.top, 10)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
                 }
                 if model.flash {
                     Color.black.opacity(0.85).allowsHitTesting(false)
@@ -72,21 +93,53 @@ struct ContentView: View {
                     .allowsHitTesting(false)
                 }
             }
-            .contentShape(Rectangle())
-            .gesture(
-                SpatialTapGesture().onEnded { value in
-                    model.tap(at: CGPoint(x: value.location.x / geo.size.width,
-                                          y: value.location.y / geo.size.height))
-                }
-            )
-            .simultaneousGesture(
-                MagnifyGesture()
-                    .onChanged { value in model.pinchChanged(value.magnification) }
-                    .onEnded { _ in model.pinchEnded() }
-            )
         }
         .aspectRatio(model.info?.imageAspect ?? 0.75, contentMode: .fit)
         .clipped()
+    }
+}
+
+private struct ProBar: View {
+    @ObservedObject var model: CameraModel
+    @ObservedObject var live: LiveState
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 2) {
+                ForEach(FocusMode.allCases.filter { $0 != .manual }) { mode in
+                    Button {
+                        model.focusMode = mode
+                    } label: {
+                        Text(mode.title)
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(model.focusMode == mode ? Color.black : Color.white)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(model.focusMode == mode ? Color.yellow : Color.clear, in: Capsule())
+                    }
+                }
+            }
+            .padding(2)
+            .background(.white.opacity(0.1), in: Capsule())
+            Spacer(minLength: 0)
+            Text(readout)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var readout: String {
+        let r = live.overlay.readout
+        guard r.iso > 0 else { return "" }
+        return "ISO \(Int(r.iso.rounded()))  \(Self.shutter(r.duration))  EV \(String(format: "%+.1f", r.bias))"
+    }
+
+    static func shutter(_ seconds: Double) -> String {
+        guard seconds > 0 else { return "" }
+        if seconds >= 0.95 { return String(format: "%.1f\"", seconds) }
+        return "1/\(Int((1 / seconds).rounded()))"
     }
 }
 

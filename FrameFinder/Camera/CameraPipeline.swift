@@ -26,6 +26,9 @@ final class CameraPipeline: NSObject {
     private var maxZoom: CGFloat = 10
     private var inFlight: [Int64: PhotoCaptureProcessor] = [:]
 
+    private let focusControl = FocusExposureController()
+    private var lastEyes: [CGPoint] = []
+
     private let tracker = MotionTracker()
     private let analyzer = SceneAnalyzer()
     private let engine = CompositionEngine()
@@ -108,6 +111,7 @@ final class CameraPipeline: NSObject {
         } catch {}
 
         self.device = device
+        focusControl.attach(device)
         self.baseZoom = base
         self.maxZoom = maxZoom
 
@@ -172,23 +176,25 @@ final class CameraPipeline: NSObject {
         }
     }
 
-    func focus(at point: CGPoint) {
-        sessionQueue.async { [weak self] in
-            guard let device = self?.device else { return }
-            let p = CGPoint(x: min(max(point.y, 0), 1), y: min(max(1 - point.x, 0), 1))
-            do {
-                try device.lockForConfiguration()
-                if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.continuousAutoFocus) {
-                    device.focusPointOfInterest = p
-                    device.focusMode = .continuousAutoFocus
-                }
-                if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.continuousAutoExposure) {
-                    device.exposurePointOfInterest = p
-                    device.exposureMode = .continuousAutoExposure
-                }
-                device.unlockForConfiguration()
-            } catch {}
-        }
+    func setFocusMode(_ mode: FocusMode) {
+        sessionQueue.async { self.focusControl.setMode(mode) }
+    }
+
+    func tapFocus(at point: CGPoint) {
+        let now = CACurrentMediaTime()
+        sessionQueue.async { self.focusControl.tap(at: point, now: now) }
+    }
+
+    func lockFocus(at point: CGPoint) {
+        sessionQueue.async { self.focusControl.lock(at: point) }
+    }
+
+    func unlockFocus() {
+        sessionQueue.async { self.focusControl.unlock() }
+    }
+
+    func setExposureBias(_ ev: Float) {
+        sessionQueue.async { self.focusControl.setBias(ev) }
     }
 
     func capture(crop: CGRect?, rotation: PhotoRotation, saveOriginal: Bool,
@@ -257,6 +263,19 @@ final class CameraPipeline: NSObject {
     }
 }
 
+extension CameraPipeline {
+    private func smartFocusTarget(for frame: OverlayState.Frame?) -> CGPoint? {
+        guard let frame, frame.visible > 0.6 else { return nil }
+        if let face = frame.faces.max(by: { $0.area < $1.area }) {
+            if let eye = lastEyes.first(where: { face.insetBy(dx: -0.01, dy: -0.01).contains($0) }) {
+                return eye
+            }
+            return CGPoint(x: face.midX, y: face.minY + face.height * 0.4)
+        }
+        return CGPoint(x: min(max(frame.subject.x, 0.02), 0.98), y: min(max(frame.subject.y, 0.02), 0.98))
+    }
+}
+
 extension CameraPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -280,6 +299,7 @@ extension CameraPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
             lastAnalysis = now
             if let scene = analyzer.analyze(pixelBuffer) {
                 engine.ingest(scene, now: now)
+                lastEyes = scene.eyes
             }
             if now - lastAesthetics >= aestheticsInterval, !aestheticsBusy, aestheticsFailures < 5 {
                 runAesthetics(on: pixelBuffer, now: now)
@@ -289,6 +309,10 @@ extension CameraPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
         var state = OverlayState()
         state.frame = engine.overlayFrame()
         state.zoom = zoom / baseZoom
+        if let device { state.readout = FocusExposureController.readout(of: device) }
+        if lastAnalysis == now, let target = smartFocusTarget(for: state.frame) {
+            sessionQueue.async { self.focusControl.track(target, now: now) }
+        }
         let callback = onOverlay
         DispatchQueue.main.async { callback?(state) }
     }
