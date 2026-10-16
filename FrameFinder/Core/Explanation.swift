@@ -7,7 +7,7 @@ struct ShotReason: Codable, Equatable, Hashable {
 }
 
 enum Explainer {
-    static func reasons(for b: Breakdown, wholeValue: Double, aesthetic: Double?) -> [ShotReason] {
+    static func reasons(for b: Breakdown, wholeValue: Double, aesthetic: Double?, neural: Double? = nil) -> [ShotReason] {
         var good: [ShotReason] = []
         var bad: [ShotReason] = []
 
@@ -84,6 +84,14 @@ enum Explainer {
             }
         }
 
-        return Array((good + bad).prefix(7))
+        if let neural {
+            if neural > 1.05 {
+                good.append(ShotReason(symbol: "brain", text: "Нейросеть GAIC ставит этот кадр выше соседних вариантов", good: true))
+            } else if neural < 0.95 {
+                bad.append(ShotReason(symbol: "brain", text: "Нейросеть GAIC оценивает кадр ниже соседних вариантов", good: false))
+            }
+        }
+
+        return Array((good + bad).prefix(8))
     }
 }

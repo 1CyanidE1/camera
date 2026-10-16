@@ -12,6 +12,10 @@ permissions:
   contents: write
   actions: write
 
+concurrency:
+  group: convert-models
+  cancel-in-progress: true
+
 jobs:
   convert:
     runs-on: macos-15
@@ -51,6 +55,7 @@ jobs:
             echo "no changes"
           else
             git commit -m "Модели Core ML"
+            git pull --rebase origin main
             git push
           fi
 

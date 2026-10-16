@@ -25,9 +25,11 @@ final class CameraPipeline: NSObject {
     var onConfigured: ((CameraInfo?) -> Void)?
     var assistSink: ((CGImage?) -> Void)?
     var loupeSink: ((CGImage?) -> Void)?
+    var onNeuralAvailability: ((Bool) -> Void)?
 
     private let sessionQueue = DispatchQueue(label: "camera.session")
     private let videoQueue = DispatchQueue(label: "camera.video", qos: .userInteractive)
+    private let mlQueue = DispatchQueue(label: "camera.ml", qos: .utility)
     private let videoOutput = AVCaptureVideoDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
     private var device: AVCaptureDevice?
@@ -63,6 +65,10 @@ final class CameraPipeline: NSObject {
     private var lastAesthetics: CFTimeInterval = 0
     private var aestheticsBusy = false
     private var aestheticsFailures = 0
+    private var neuralWanted = false
+    private var neuralReady = false
+    private var neuralBusy = false
+    private var lastNeural: CFTimeInterval = 0
 
     private let analysisInterval: CFTimeInterval = 0.15
     private let aestheticsInterval: CFTimeInterval = 0.7
@@ -280,6 +286,24 @@ final class CameraPipeline: NSObject {
         videoQueue.async { self.forcePeaking = on }
     }
 
+    func setNeuralFraming(_ enabled: Bool) {
+        videoQueue.async {
+            self.neuralWanted = enabled
+            self.engine.neuralEnabled = enabled && self.neuralReady
+        }
+        guard enabled else { return }
+        mlQueue.async { [weak self] in
+            let ready = CropRanker.shared.isAvailable
+            self?.videoQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.neuralReady = ready
+                self.engine.neuralEnabled = self.neuralWanted && ready
+            }
+            let callback = self?.onNeuralAvailability
+            DispatchQueue.main.async { callback?(ready) }
+        }
+    }
+
     func setFaceQuality(_ enabled: Bool) {
         videoQueue.async { self.analyzer.qualityEnabled = enabled }
     }
@@ -361,6 +385,25 @@ final class CameraPipeline: NSObject {
 }
 
 extension CameraPipeline {
+    private func runNeural(on pixelBuffer: CVPixelBuffer, now: CFTimeInterval) {
+        let jobs = engine.neuralJobs(now: now)
+        guard !jobs.isEmpty,
+              let input = CropRanker.input(from: CIImage(cvPixelBuffer: pixelBuffer), context: ciContext) else { return }
+        neuralBusy = true
+        lastNeural = now
+        mlQueue.async { [weak self] in
+            let scores = CropRanker.shared.scores(for: input, rects: jobs.map(\.rect))
+            self?.videoQueue.async { [weak self] in
+                guard let self = self else { return }
+                if let scores, scores.count == jobs.count {
+                    let factors = CropRanker.factors(scores)
+                    self.engine.setNeural(zip(jobs, factors).map { (key: $0.0.key, factor: $0.1) })
+                }
+                self.neuralBusy = false
+            }
+        }
+    }
+
     private func runAssist(_ pixelBuffer: CVPixelBuffer, now: CFTimeInterval) {
         if assistOptions.histogram, now - lastHistogram > 0.1 {
             lastHistogram = now
@@ -449,6 +492,9 @@ extension CameraPipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
             if now - lastAesthetics >= aestheticsInterval, !aestheticsBusy, aestheticsFailures < 5 {
                 runAesthetics(on: pixelBuffer, now: now)
+            }
+            if neuralWanted, neuralReady, !neuralBusy, now - lastNeural >= 0.5 {
+                runNeural(on: pixelBuffer, now: now)
             }
         }
 

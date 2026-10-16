@@ -32,14 +32,24 @@ enum Recheck {
         let bestAesthetic = await aesthetic(of: best.rect, in: cg)
         let currentAesthetic = await aesthetic(of: current, in: cg)
         func combined(_ raw: Double, _ a: Double?) -> Double { raw * (0.8 + 0.4 * (a ?? 0.5)) }
-        let newScore = combined(best.raw, bestAesthetic)
-        let oldScore = max(combined(currentRaw, currentAesthetic), 1e-9)
+        var bestFactor = 1.0, currentFactor = 1.0
+        let ranked = Array(candidates.prefix(6).map(\.rect)) + [current]
+        if CropRanker.shared.isAvailable,
+           let input = CropRanker.input(from: CIImage(cgImage: cg), context: PhotoProcessor.context),
+           let scores = CropRanker.shared.scores(for: input, rects: ranked), scores.count == ranked.count {
+            let factors = CropRanker.factors(scores)
+            bestFactor = factors[0]
+            currentFactor = factors[factors.count - 1]
+        }
+        let newScore = combined(best.raw, bestAesthetic) * bestFactor
+        let oldScore = max(combined(currentRaw, currentAesthetic) * currentFactor, 1e-9)
         let gain = newScore / oldScore
 
         guard gain >= 1.1, best.rect.iou(current) < 0.8 else { return nil }
         let breakdown = scorer.breakdown(best.rect, ratio: best.ratio)
         let whole = scorer.breakdown(.unit, ratio: aspect).value
-        let reasons = Explainer.reasons(for: breakdown, wholeValue: whole, aesthetic: bestAesthetic)
+        let reasons = Explainer.reasons(for: breakdown, wholeValue: whole, aesthetic: bestAesthetic,
+                                        neural: bestFactor == 1 ? nil : bestFactor)
         return RecheckResult(crop: best.rect, ratio: best.ratio, label: AspectMode.label(for: best.ratio),
                              reasons: reasons, aesthetic: bestAesthetic, gain: gain)
     }

@@ -191,6 +191,11 @@ private struct TopBar: View {
                 Toggle("Зебра на пересветах", isOn: $model.assist.zebra)
                 Toggle("Подсветка резкости", isOn: $model.assist.peaking)
                 Toggle("Гистограмма", isOn: $model.assist.histogram)
+                Toggle(model.neuralAvailable ? "Нейросеть для кадра" : "Нейросеть для кадра (нет модели)",
+                       isOn: $model.neuralFraming)
+                    .disabled(!model.neuralAvailable)
+                Button("Совет профи (облако) — скоро") {}
+                    .disabled(true)
             } label: {
                 Image(systemName: "gearshape")
                     .font(.body.weight(.semibold))

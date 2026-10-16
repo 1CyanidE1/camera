@@ -28,6 +28,7 @@ final class CompositionEngine {
     var aspectMode: AspectMode = .auto
     var up: UpDirection = .top
     var imageAspect: Double = 3.0 / 4.0
+    var neuralEnabled = false
 
     private struct Suggestion {
         let id: Int
@@ -40,6 +41,13 @@ final class CompositionEngine {
         var reasons: [ShotReason] = []
         var anchor: CGPoint?
         var faces: [CGRect] = []
+    }
+
+    private struct NeuralEntry {
+        let key: Int
+        var rect: CGRect
+        var factor: Double?
+        let time: Double
     }
 
     private struct AestheticEntry {
@@ -56,6 +64,7 @@ final class CompositionEngine {
     private var challenger: (rect: CGRect, streak: Int)?
     private var candidates: [Candidate] = []
     private var aesthetics: [AestheticEntry] = []
+    private var neural: [NeuralEntry] = []
     private var displayRect: CGRect?
     private var displayId = -1
     private var nextId = 1
@@ -87,6 +96,7 @@ final class CompositionEngine {
             challenger = ch
         }
         for i in aesthetics.indices { aesthetics[i].rect = t(aesthetics[i].rect) }
+        for i in neural.indices { neural[i].rect = t(neural[i].rect) }
         for i in candidates.indices { candidates[i].rect = t(candidates[i].rect) }
         if let d = displayRect { displayRect = t(d) }
     }
@@ -119,7 +129,7 @@ final class CompositionEngine {
 
         let norm = max(top.raw, currentRaw ?? 0, 1e-9)
         func compare(_ rect: CGRect, _ raw: Double) -> Double {
-            raw / norm * aestheticFactor(for: rect)
+            raw / norm * aestheticFactor(for: rect) * (neuralFactor(for: rect) ?? 1)
         }
 
         guard var cur = current else {
@@ -177,7 +187,8 @@ final class CompositionEngine {
         let rect = c.rect.clampedInsideUnit()
         let b = scorer.breakdown(rect, ratio: c.ratio)
         let whole = scorer.breakdown(.unit, ratio: up.isLandscape ? 4.0 / 3.0 : 3.0 / 4.0).value
-        c.reasons = Explainer.reasons(for: b, wholeValue: whole, aesthetic: aestheticScore(for: c.rect))
+        c.reasons = Explainer.reasons(for: b, wholeValue: whole, aesthetic: aestheticScore(for: c.rect),
+                                      neural: neuralFactor(for: c.rect))
         c.anchor = b.anchor
         c.faces = scorer.wholeFaces(in: rect)
         current = c
@@ -209,6 +220,43 @@ final class CompositionEngine {
             jobs.append((key: key, rect: r))
         }
         return jobs
+    }
+
+    func neuralJobs(now: Double) -> [(key: Int, rect: CGRect)] {
+        guard neuralEnabled else { return [] }
+        neural.removeAll { now - $0.time > 3 }
+        var targets: [CGRect] = []
+        if let c = current { targets.append(c.rect) }
+        if let ch = challenger { targets.append(ch.rect) }
+        targets += candidates.map(\.rect)
+        var jobs: [(key: Int, rect: CGRect)] = []
+        for t in targets {
+            if jobs.count >= 10 { break }
+            guard CGRect.unit.coverage(of: t) > 0.97 else { continue }
+            let r = t.clampedInsideUnit()
+            if jobs.contains(where: { $0.rect.iou(r) > 0.85 }) { continue }
+            let key = nextKey
+            nextKey += 1
+            neural.append(NeuralEntry(key: key, rect: r, factor: nil, time: now))
+            jobs.append((key: key, rect: r))
+        }
+        return jobs
+    }
+
+    func setNeural(_ results: [(key: Int, factor: Double)]) {
+        for result in results {
+            if let i = neural.firstIndex(where: { $0.key == result.key }) {
+                neural[i].factor = result.factor
+            }
+        }
+    }
+
+    private func neuralFactor(for rect: CGRect) -> Double? {
+        guard neuralEnabled else { return nil }
+        return neural
+            .filter { $0.factor != nil && $0.rect.iou(rect) > 0.75 }
+            .max { $0.time < $1.time }?
+            .factor
     }
 
     func setAesthetic(key: Int, score: Double) {

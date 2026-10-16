@@ -89,6 +89,13 @@ final class CameraModel: ObservableObject {
         }
     }
     @Published var autoProgress: Double?
+    @Published var neuralAvailable = false
+    @Published var neuralFraming = UserDefaults.standard.object(forKey: "neuralFraming") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(neuralFraming, forKey: "neuralFraming")
+            pipeline.setNeuralFraming(neuralFraming)
+        }
+    }
     @Published var explain = UserDefaults.standard.bool(forKey: "explain") {
         didSet { UserDefaults.standard.set(explain, forKey: "explain") }
     }
@@ -161,6 +168,8 @@ final class CameraModel: ObservableObject {
         pipeline.setFocusMode(focusMode)
         pipeline.setAssist(assist)
         pipeline.setFaceQuality(autoShutter)
+        pipeline.onNeuralAvailability = { [weak self] ready in self?.neuralAvailable = ready }
+        pipeline.setNeuralFraming(neuralFraming)
         pipeline.configure(mode: captureMode)
         startMotion()
     }
