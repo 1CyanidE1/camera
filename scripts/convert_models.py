@@ -83,10 +83,7 @@ def convert_color():
 
     def axis_for(channel):
         cube = basis[0, channel]
-        scores = []
-        for axis in range(3):
-            profile = cube.mean(axis=tuple(a for a in range(3) if a != axis))
-            scores.append(np.corrcoef(profile, ramp)[0, 1])
+        scores = [float(np.abs(np.diff(cube, axis=axis)).mean()) for axis in range(3)]
         return int(np.argmax(scores)), scores
 
     red_axis, red_scores = axis_for(0)

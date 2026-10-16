@@ -63,7 +63,7 @@ final class CropRanker {
         loadIfNeeded()
         guard let model, !rects.isEmpty, let map = featureMap(model: model, image: image) else { return nil }
         let w = Float(image.width), h = Float(image.height)
-        return rects.map { rect in
+        return rects.map { rect -> Float in
             let box = (Float(rect.minX) * w, Float(rect.minY) * h, Float(rect.maxX) * w, Float(rect.maxY) * h)
             return score(features(map, box: box))
         }
