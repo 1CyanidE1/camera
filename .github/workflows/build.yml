@@ -35,7 +35,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build > build.log 2>&1 || true
           grep -E "error:|BUILD (SUCCEEDED|FAILED)" build.log | head -100 || true
-          if [ ! -d build/Release-iphoneos/FrameFinder.app ]; then
+          if [ ! -f build/Release-iphoneos/FrameFinder.app/FrameFinder ] || grep -q "BUILD FAILED" build.log; then
             grep -E "^/.*: error: " build.log | sort -u | head -40 \
               | sed -E 's#^.*/(FrameFinder/[^:]+):([0-9]+):([0-9]+): error: (.*)$#\1:\2:\3: \4#' > errors.txt || true
             if [ -s errors.txt ]; then
@@ -49,6 +49,7 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Release-iphoneos/FrameFinder.app Payload/
+          test -f Payload/FrameFinder.app/FrameFinder
           zip -qry FrameFinder.ipa Payload
 
       - uses: actions/upload-artifact@v4
