@@ -1,5 +1,6 @@
 import os
 import sys
+import traceback
 
 import coremltools as ct
 import numpy as np
@@ -117,5 +118,10 @@ def convert_color():
 
 
 if __name__ == '__main__':
-    convert_color()
+    try:
+        convert_color()
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        sys.exit(1)
     print('done')

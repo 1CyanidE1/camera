@@ -37,7 +37,8 @@ jobs:
           echo "exit status $status" >> convert.log
           cat convert.log
           if [ $status -ne 0 ]; then
-            echo "::error title=convert.log::$(tail -45 convert.log | cut -c1-300 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            tr '\r' '\n' < convert.log | grep -v '%|' | grep -v '^[[:space:]]*$' | tail -40 | cut -c1-240 > tail.log
+            echo "::error title=convert.log::$(sed 's/%/%25/g; s/::/: :/g' tail.log | awk '{printf "%s%%0A", $0}')"
             exit 1
           fi
 
